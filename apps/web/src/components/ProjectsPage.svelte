@@ -24,6 +24,7 @@ import {
 	ShieldCheck,
 	Sparkles,
 	Star,
+	SquareTerminal,
 	Trash2,
 	TriangleAlert,
 	X,
@@ -66,6 +67,7 @@ import QuestionCard from "./chat/QuestionCard.svelte";
 import Turn from "./chat/Turn.svelte";
 import KanbanBoard from "./KanbanBoard.svelte";
 import WorkspaceCodePreview from "./WorkspaceCodePreview.svelte";
+import TerminalPanel from "./TerminalPanel.svelte";
 
 let projects = $state<Project[]>([]);
 let sessions = $state<ChatSession[]>([]);
@@ -133,7 +135,8 @@ type ChatPanel =
 	| "git"
 	| "pull-requests"
 	| "changes"
-	| "walkthrough";
+	| "walkthrough"
+	| "terminal";
 let activePanel = $state<ChatPanel | null>(null);
 let previewExpanded = $state(false);
 let previewHasUnsavedChanges = $state(false);
@@ -763,7 +766,11 @@ async function showPanel(panel: ChatPanel, force = false) {
 	const projectId = selectedProjectId;
 	const currentSession = sessionId;
 	panelLoading = false;
-	if (panel === "context" || panel === "files") return;
+	if (panel === "context" || panel === "files" || panel === "terminal") {
+		if (panel === "terminal" && !projectId)
+			panelError = "Choose a project before opening a terminal.";
+		return;
+	}
 	if (
 		(panel === "git" || panel === "pull-requests" || panel === "walkthrough") &&
 		!projectId
@@ -1166,9 +1173,11 @@ async function answer(requestId: string, answers: string[][]) {
     {#if sessionId && viewMode === "chat"}<div class="shrink-0 border-t bg-background px-5 py-4"><div class="mx-auto max-w-3xl"><Composer projectId={selectedProjectId} {catalog} {customAgents} {busy} disabled={!conversation || sessionLoading} onsend={send} onstop={stop} bind:draft bind:model bind:agent bind:customAgentId autoAccept={selectedProject?.autoAccept ?? false} onAutoAcceptChange={selectedProject ? (value) => void setAutoAccept(value) : undefined} /></div></div>{/if}
     </div>
     {#if activePanel}
-      <aside class={activePanel === "files" ? (previewExpanded ? "relative flex min-w-0 flex-1 flex-col border-l bg-card/30" : "relative flex w-[min(900px,76vw)] min-w-0 shrink-0 flex-col border-l bg-card/30") : activePanel === "walkthrough" ? "flex w-[min(850px,76vw)] shrink-0 flex-col border-l bg-card/30" : "flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]"} aria-label={`${activePanel} panel`}>
+      <aside class={activePanel === "files" ? (previewExpanded ? "relative flex min-w-0 flex-1 flex-col border-l bg-card/30" : "relative flex w-[min(900px,76vw)] min-w-0 shrink-0 flex-col border-l bg-card/30") : activePanel === "walkthrough" ? "flex w-[min(850px,76vw)] shrink-0 flex-col border-l bg-card/30" : activePanel === "terminal" ? "flex w-[min(760px,70vw)] min-w-[400px] shrink-0 flex-col border-l bg-card/30" : "flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]"} aria-label={`${activePanel} panel`}>
         {#if activePanel === "files"}
           {#key selectedProjectId}<WorkspaceCodePreview projectId={selectedProjectId} projectName={selectedProject?.name ?? "Project"} {busy} bind:hasUnsavedChanges={previewHasUnsavedChanges} bind:expanded={previewExpanded} onclose={() => { previewExpanded = false; activePanel = null; }} />{/key}
+        {:else if activePanel === "terminal"}
+          {#key selectedProjectId}<TerminalPanel projectId={selectedProjectId} />{/key}
         {:else}
         <div class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
           <p class="min-w-0 flex-1 truncate text-sm font-medium">{activePanel === "context" ? "Context usage" : activePanel === "git" ? "Git" : activePanel === "pull-requests" ? "Pull requests" : activePanel === "walkthrough" ? "Walkthrough" : "Changes"}</p>
@@ -1290,6 +1299,7 @@ async function answer(requestId: string, answers: string[][]) {
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "pull-requests" ? "text-primary" : "text-muted-foreground"}`} aria-label="Pull requests" title="Pull requests" aria-pressed={activePanel === "pull-requests"} onclick={() => void showPanel("pull-requests")}><GitPullRequest size={16} /></Button>
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "changes" ? "text-primary" : "text-muted-foreground"}`} aria-label="Changed files" title="Changed files" aria-pressed={activePanel === "changes"} onclick={() => void showPanel("changes")}><FileDiffIcon size={16} /></Button>
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "walkthrough" ? "text-primary" : "text-muted-foreground"}`} aria-label="Walkthrough" title="Walkthrough" aria-pressed={activePanel === "walkthrough"} onclick={() => void showPanel("walkthrough")}><ListTree size={16} /></Button>
+      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "terminal" ? "bg-accent text-primary" : "text-muted-foreground"}`} aria-label="Terminal" title="Terminal" aria-pressed={activePanel === "terminal"} disabled={!selectedProjectId} onclick={() => void showPanel("terminal")}><SquareTerminal size={16} /></Button>
     </nav>
     </div>
     {/if}

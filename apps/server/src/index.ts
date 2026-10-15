@@ -97,6 +97,7 @@ import {
 } from "./projects";
 import { auth, checkDbHealth, getDb } from "./services";
 import { collectWalkthroughSnapshot } from "./walkthrough";
+import { TerminalManager } from "./terminal";
 
 const { upgradeWebSocket, websocket: bunWebSocket } = createBunWebSocket();
 
@@ -533,8 +534,11 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		| ReturnType<typeof providerManager.refreshAll>
 		| undefined;
 	let providerModelBootstrap: Promise<void> | undefined;
+	let openCodeStartup: Promise<void> = Promise.resolve();
 	const discoverProviders = () =>
-		(providerDiscovery ??= providerManager.refreshAll());
+		(providerDiscovery ??= openCodeStartup.then(() =>
+			providerManager.refreshAll(),
+		));
 	const refreshConnectedProviderModels = async (
 		connections: Awaited<ReturnType<typeof providerManager.refreshAll>>,
 	) => {
@@ -560,7 +564,7 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		// Start OpenCode in the background so the daemon can bind its API
 		// immediately. A missing or slow provider must not leave the client in
 		// an endless reconnect loop.
-		void openCodeManager.start().catch((error) =>
+		openCodeStartup = openCodeManager.start().catch((error) =>
 			log(
 				"opencode",
 				"unavailable",
@@ -592,6 +596,8 @@ export async function createApp(options: DaemonAppOptions = {}) {
 	await automation.recover();
 	const projectValidation =
 		options.projectValidation ?? createProjectValidationService();
+	const terminalManager = new TerminalManager();
+	await terminalManager.ready();
 	const app = new Hono();
 	const walkthroughRuns = new Map<string, WalkthroughRun>();
 	const allowedOrigins = new Set(
@@ -682,7 +688,8 @@ export async function createApp(options: DaemonAppOptions = {}) {
 			c.req.path.startsWith("/api/auth/") ||
 			c.req.path.startsWith("/api/agy/permission/") ||
 			c.req.path === "/api/events" ||
-			c.req.path === "/api/bootstrap"
+			c.req.path === "/api/bootstrap" ||
+			(/^\/api\/terminals\/[^/]+\/stream$/.test(c.req.path) && c.req.method === "GET")
 		)
 			return next();
 		const authorization = c.req.header("Authorization");
@@ -714,6 +721,97 @@ export async function createApp(options: DaemonAppOptions = {}) {
 	app.get("/api/meta", (c) =>
 		c.json({ version: VERSION, protocolVersion: PROTOCOL_VERSION }),
 	);
+	app.get("/api/projects/:id/terminals", async (c) => {
+		const project = await repos.projects.getById(c.req.param("id"));
+		if (!project) return errorResponse(c, new Error("Project not found"));
+		try {
+			const root = await projectValidation.validate(project.path);
+			return c.json(await terminalManager.list(project.id, root.path));
+		} catch (error) {
+			return errorResponse(c, error);
+		}
+	});
+	app.post("/api/projects/:id/terminals", async (c) => {
+		const project = await repos.projects.getById(c.req.param("id"));
+		if (!project) return errorResponse(c, new Error("Project not found"));
+		try {
+			const root = await projectValidation.validate(project.path);
+			const input = z.object({
+				cols: z.number().int().min(20).max(300),
+				rows: z.number().int().min(5).max(120),
+				idempotencyKey: z.string().trim().min(1).max(120),
+			}).parse(await jsonBody(c));
+			return c.json(await terminalManager.create({
+				projectId: project.id, workspaceId: root.path, cwd: root.path,
+				...input,
+			}), 201);
+		} catch (error) {
+			return errorResponse(c, error);
+		}
+	});
+	app.post("/api/terminals/:id/ticket", async (c) => {
+		const projectId = c.req.query("projectId") ?? "";
+		if (!projectId || !(await repos.projects.getById(projectId)))
+			return errorResponse(c, new Error("Project not found"));
+		try {
+			return c.json(terminalManager.issueTicket(c.req.param("id"), projectId));
+		} catch (error) {
+			return errorResponse(c, error);
+		}
+	});
+	app.post("/api/terminals/:id/restart", async (c) => {
+		const projectId = c.req.query("projectId") ?? "";
+		const project = projectId ? await repos.projects.getById(projectId) : undefined;
+		if (!project)
+			return errorResponse(c, new Error("Project not found"));
+		try {
+			const root = await projectValidation.validate(project.path);
+			const input = z.object({
+				expectedGeneration: z.number().int().positive(),
+				approved: z.literal(true),
+				idempotencyKey: z.string().trim().min(1).max(120),
+			}).parse(await jsonBody(c));
+			return c.json(await terminalManager.restart(c.req.param("id"), projectId, root.path, input.expectedGeneration, input.approved, input.idempotencyKey));
+		} catch (error) {
+			return errorResponse(c, error);
+		}
+	});
+	app.delete("/api/terminals/:id", async (c) => {
+		const projectId = c.req.query("projectId") ?? "";
+		if (!projectId || !(await repos.projects.getById(projectId)))
+			return errorResponse(c, new Error("Project not found"));
+		try {
+			const input = z.object({
+				expectedGeneration: z.number().int().positive(),
+				approved: z.literal(true),
+			}).parse(await jsonBody(c));
+			await terminalManager.closeSession(c.req.param("id"), projectId, input.expectedGeneration, input.approved);
+			return c.body(null, 204);
+		} catch (error) {
+			return errorResponse(c, error);
+		}
+	});
+	app.get("/api/terminals/:id/stream", upgradeWebSocket((c) => {
+		const terminalId = c.req.param("id") ?? "";
+		const ticket = c.req.query("ticket") ?? "";
+		let attachment: ReturnType<typeof terminalManager.attach> | undefined;
+		return {
+			onOpen(_event, ws) {
+				attachment = terminalManager.attach(terminalId, ticket, {
+					send: (value) => ws.send(value),
+					close: (code, reason) => ws.close(code, reason),
+				});
+			},
+			onMessage(event, _ws) {
+				const attachmentId = attachment?.id;
+				if (!attachmentId) return;
+				const data = typeof event.data === "string" ? event.data : "";
+				terminalManager.message(terminalId, attachmentId, data);
+			},
+			onClose() { attachment?.detach(); },
+			onError() { attachment?.detach(); },
+		};
+	}));
 	const updateReady = async () => {
 		const scheduler = orchestrator.getScheduler().getState();
 		if (scheduler.running.length || scheduler.queued.length)
@@ -1462,6 +1560,8 @@ export async function createApp(options: DaemonAppOptions = {}) {
 	app.delete("/api/projects/:id", async (c) => {
 		const project = await repos.projects.getById(c.req.param("id"));
 		if (!project) return errorResponse(c, new Error("Project not found"));
+		if (terminalManager.hasLiveSessions(project.id))
+			return c.json({ error: { message: "Stop active terminal sessions before removing this project." } }, 409);
 		await repos.projects.delete(project.id);
 		return c.body(null, 204);
 	});
@@ -2155,6 +2255,7 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		app,
 		config,
 		close: async () => {
+			await terminalManager.close();
 			await orchestrator.getScheduler().shutdown();
 			for (const client of clients) client.close();
 			clients.clear();
