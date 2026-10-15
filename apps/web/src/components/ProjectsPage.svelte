@@ -7,9 +7,7 @@ import {
 	FileCode,
 	FileDiff as FileDiffIcon,
 	Folder,
-	FolderOpen,
 	FolderPlus,
-	Gauge,
 	GitBranch,
 	GitPullRequest,
 	ListTree,
@@ -21,10 +19,10 @@ import {
 	RefreshCw,
 	Search,
 	Settings,
+	SlidersHorizontal,
 	ShieldCheck,
 	Sparkles,
 	Star,
-	SquareTerminal,
 	Trash2,
 	TriangleAlert,
 	X,
@@ -43,7 +41,8 @@ import {
 } from "$lib/chat";
 import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
 import { Badge } from "$lib/components/ui/badge";
-import { Button } from "$lib/components/ui/button";
+import { Button, buttonVariants } from "$lib/components/ui/button";
+import * as Checkbox from "$lib/components/ui/checkbox";
 import * as Command from "$lib/components/ui/command";
 import * as Dialog from "$lib/components/ui/dialog";
 import { Input } from "$lib/components/ui/input";
@@ -51,6 +50,16 @@ import * as Marker from "$lib/components/ui/marker";
 import * as Popover from "$lib/components/ui/popover";
 import * as Select from "$lib/components/ui/select";
 import * as Tabs from "$lib/components/ui/tabs";
+import {
+	chatPanelRegistry,
+	isChatPanelVisible,
+	parseRailPanelPreferences,
+	railPanelPreferencesKey,
+	defaultRailPanelPreferences,
+	withChatPanelVisibility,
+	type ChatPanelId,
+	type RailPanelPreferences,
+} from "$lib/chat-panels";
 import {
 	daemon,
 	type Project,
@@ -129,15 +138,11 @@ let fileError = $state("");
 let fileName = $state("");
 let fileContent = $state("");
 let diffs = $state<FileDiff[]>([]);
-type ChatPanel =
-	| "files"
-	| "context"
-	| "git"
-	| "pull-requests"
-	| "changes"
-	| "walkthrough"
-	| "terminal";
-let activePanel = $state<ChatPanel | null>(null);
+let activePanel = $state<ChatPanelId | null>(null);
+let panelPreferences = $state<RailPanelPreferences>(defaultRailPanelPreferences());
+let panelPreferencesReady = $state(false);
+let panelPreferencesSaveError = $state(false);
+let configurePanelsOpen = $state(false);
 let previewExpanded = $state(false);
 let previewHasUnsavedChanges = $state(false);
 let gitOverview = $state<ProjectGitOverview | null>(null);
@@ -189,6 +194,14 @@ let sending = $state(false);
 let permissionReplying = $state<string | null>(null);
 const selectedProject = $derived(
 	projects.find((p) => p.id === selectedProjectId),
+);
+const availableChatPanels = $derived(
+	chatPanelRegistry.filter((panel) => panel.isAvailable({ projectId: selectedProjectId })),
+);
+const visibleChatPanels = $derived(
+	panelPreferencesReady
+		? availableChatPanels.filter((panel) => isChatPanelVisible(panel, panelPreferences))
+		: [],
 );
 const messages = $derived([
 	...(conversation?.messages ?? []),
@@ -689,6 +702,19 @@ async function poll() {
 }
 onMount(() => {
 	sidebarOpen = window.innerWidth >= 768;
+	try {
+		panelPreferences = parseRailPanelPreferences(window.localStorage.getItem(railPanelPreferencesKey));
+	} catch {
+		panelPreferences = defaultRailPanelPreferences();
+		panelPreferencesSaveError = true;
+	}
+	panelPreferencesReady = true;
+	const syncPanelPreferences = (event: StorageEvent) => {
+		if (event.key !== railPanelPreferencesKey && event.key !== null) return;
+		panelPreferences = parseRailPanelPreferences(event.key === null ? null : event.newValue);
+		panelPreferencesSaveError = false;
+	};
+	window.addEventListener("storage", syncPanelPreferences);
 	const refreshProviders = () => {
 		catalogNonce += 1;
 	};
@@ -718,6 +744,7 @@ onMount(() => {
 	})();
 	return () => {
 		disposed = true;
+		window.removeEventListener("storage", syncPanelPreferences);
 		window.removeEventListener("loom:providers-changed", refreshProviders);
 		clearTimeout(timer);
 	};
@@ -749,7 +776,7 @@ async function newSession(projectId = selectedProjectId) {
 	sessionLoading = false;
 	await goto(homeUrl());
 }
-async function showPanel(panel: ChatPanel, force = false) {
+async function showPanel(panel: ChatPanelId, force = false) {
 	if (activePanel === "files" && previewHasUnsavedChanges) {
 		toast.error("Save or discard file edits before leaving the file preview.");
 		return;
@@ -818,6 +845,29 @@ async function showPanel(panel: ChatPanel, force = false) {
 	} finally {
 		if (request === panelRequest) panelLoading = false;
 	}
+}
+function saveRailPanelPreferences() {
+	try {
+		window.localStorage.setItem(railPanelPreferencesKey, JSON.stringify(panelPreferences));
+		panelPreferencesSaveError = false;
+	} catch {
+		// Keep the in-memory choice and offer a retry in the dialog.
+		panelPreferencesSaveError = true;
+	}
+}
+function setRailPanelVisibility(panelId: ChatPanelId, visible: boolean) {
+	const panel = chatPanelRegistry.find((item) => item.id === panelId);
+	if (!panel) return;
+	panelPreferences = withChatPanelVisibility(panelPreferences, panel, visible);
+	saveRailPanelPreferences();
+}
+function resetRailPanelPreferences() {
+	panelPreferences = defaultRailPanelPreferences();
+	saveRailPanelPreferences();
+}
+function openRegisteredPanel(panelId: ChatPanelId) {
+	const panel = chatPanelRegistry.find((item) => item.id === panelId);
+	panel?.open({ projectId: selectedProjectId, openPanel: (id) => void showPanel(id) });
 }
 async function generateWalkthrough() {
 	if (!selectedProjectId || !model || walkthroughGenerating) return;
@@ -1293,18 +1343,46 @@ async function answer(requestId: string, answers: string[][]) {
       </aside>
     {/if}
     <nav class="flex w-11 shrink-0 flex-col items-center gap-1 border-l bg-card/20 py-2" aria-label="Chat tools">
-      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "files" ? "bg-accent text-primary" : "text-muted-foreground"}`} aria-label="Project files" title="Project files" aria-pressed={activePanel === "files"} disabled={!selectedProjectId} onclick={() => void showPanel("files")}><FolderOpen size={16} /></Button>
-      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "context" ? "text-primary" : "text-muted-foreground"}`} aria-label="Context usage" title="Context usage" aria-pressed={activePanel === "context"} onclick={() => void showPanel("context")}><Gauge size={16} /></Button>
-      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "git" ? "text-primary" : "text-muted-foreground"}`} aria-label="Git status" title="Git status" aria-pressed={activePanel === "git"} onclick={() => void showPanel("git")}><GitBranch size={16} /></Button>
-      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "pull-requests" ? "text-primary" : "text-muted-foreground"}`} aria-label="Pull requests" title="Pull requests" aria-pressed={activePanel === "pull-requests"} onclick={() => void showPanel("pull-requests")}><GitPullRequest size={16} /></Button>
-      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "changes" ? "text-primary" : "text-muted-foreground"}`} aria-label="Changed files" title="Changed files" aria-pressed={activePanel === "changes"} onclick={() => void showPanel("changes")}><FileDiffIcon size={16} /></Button>
-      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "walkthrough" ? "text-primary" : "text-muted-foreground"}`} aria-label="Walkthrough" title="Walkthrough" aria-pressed={activePanel === "walkthrough"} onclick={() => void showPanel("walkthrough")}><ListTree size={16} /></Button>
-      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "terminal" ? "bg-accent text-primary" : "text-muted-foreground"}`} aria-label="Terminal" title="Terminal" aria-pressed={activePanel === "terminal"} disabled={!selectedProjectId} onclick={() => void showPanel("terminal")}><SquareTerminal size={16} /></Button>
+      {#each visibleChatPanels as panel (panel.id)}
+        {@const PanelIcon = panel.icon}
+        <Button variant="ghost" size="icon" class={`size-9 ${activePanel === panel.id ? "bg-accent text-primary" : "text-muted-foreground"}`} aria-label={panel.label} title={panel.label} aria-pressed={activePanel === panel.id} onclick={() => openRegisteredPanel(panel.id)}><PanelIcon size={16} /></Button>
+      {/each}
+      <div class="mt-auto border-t border-white/10 pt-1">
+        <Button variant="ghost" size="icon" class="size-9 text-muted-foreground" aria-label="Configure panels" title="Configure panels" onclick={() => configurePanelsOpen = true}><SlidersHorizontal size={16} /></Button>
+      </div>
     </nav>
     </div>
     {/if}
   </main>
 </div>
+<Dialog.Root bind:open={configurePanelsOpen}>
+	<Dialog.Content class="flex max-h-[min(80svh,560px)] flex-col overflow-hidden sm:max-w-lg">
+		<Dialog.Header>
+			<Dialog.Title>Configure panels</Dialog.Title>
+			<Dialog.Description>Choose which panels appear in the sidebar. Hidden panels keep their data and any work in progress.</Dialog.Description>
+		</Dialog.Header>
+		<div class="nice-scroll min-h-0 space-y-1 overflow-y-auto pr-1" aria-label="Available sidebar panels">
+			{#each availableChatPanels.filter((panel) => panel.configurable) as panel (panel.id)}
+				{@const PanelIcon = panel.icon}
+				<label class="flex cursor-pointer items-center gap-3 rounded-lg border border-transparent px-3 py-2.5 transition hover:border-border hover:bg-accent/40 focus-within:ring-2 focus-within:ring-ring">
+					<Checkbox.Root checked={isChatPanelVisible(panel, panelPreferences)} onCheckedChange={(checked) => setRailPanelVisibility(panel.id, checked === true)} aria-label={`Show ${panel.label} in the sidebar`} />
+					<PanelIcon size={16} class="shrink-0 text-muted-foreground" />
+					<span class="min-w-0 flex-1 text-sm">{panel.label}</span>
+				</label>
+			{/each}
+		</div>
+		{#if panelPreferencesSaveError}
+			<div class="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5" role="status" aria-live="polite">
+				<p class="min-w-0 flex-1 text-xs leading-5 text-amber-100/80">Your panel choices are active for this session, but could not be saved on this device.</p>
+				<Button variant="outline" size="sm" class="h-7" onclick={saveRailPanelPreferences}>Retry</Button>
+			</div>
+		{/if}
+		<Dialog.Footer class="flex-row justify-between">
+			<Button variant="ghost" size="sm" onclick={resetRailPanelPreferences}>Reset to defaults</Button>
+			<Dialog.Close class={buttonVariants({ variant: "outline", size: "sm" })}>Close</Dialog.Close>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
 <Dialog.Root bind:open={addProjectOpen}><Dialog.Content><Dialog.Header><Dialog.Title>Add project</Dialog.Title><Dialog.Description>Connect a local Git repository to OpenCode.</Dialog.Description></Dialog.Header><AddProjectForm oncreated={() => { addProjectOpen = false; void retryConnection(); }} /></Dialog.Content></Dialog.Root>
 <Dialog.Root bind:open={renameOpen}><Dialog.Content><Dialog.Header><Dialog.Title>Rename session</Dialog.Title><Dialog.Description>Choose a title you can find in the sidebar.</Dialog.Description></Dialog.Header><form class="space-y-4" onsubmit={(event) => { event.preventDefault(); void rename(); }}><Input aria-label="Session title" bind:value={renameTitle} maxlength={200} /><Dialog.Footer><Button type="submit" disabled={!renameTitle.trim()}>Save title</Button></Dialog.Footer></form></Dialog.Content></Dialog.Root>
 <AlertDialog.Root bind:open={deleteSessionOpen}>
