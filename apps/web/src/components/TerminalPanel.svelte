@@ -174,10 +174,14 @@ type TerminalView = { terminal: Xterm; fit: FitAddonType; socket?: WebSocket; re
 			sessions = await request<TerminalSession[]>(`/api/projects/${encodeURIComponent(projectId)}/terminals`);
 			if (!sessions.length) await createSession();
 			else if (!activeId || !sessions.some((session) => session.id === activeId)) activeId = sessions[0]!.id;
-			await tick();
-			for (const session of sessions) await attach(session);
 		} catch (reason) { error = reason instanceof Error ? reason.message : "Unable to load terminals."; }
 		finally { loading = false; }
+		// The terminal viewports are inside the non-loading branch. Mount xterm
+		// only after that branch has rendered, otherwise the first session has no
+		// element to attach to and remains stuck in `creating` until another tab
+		// is opened.
+		await tick();
+		for (const session of sessions) await attach(session);
 	}
 
 	async function createSession() {
@@ -190,7 +194,8 @@ type TerminalView = { terminal: Xterm; fit: FitAddonType; socket?: WebSocket; re
 				body: JSON.stringify({ cols: measure?.terminal.cols ?? 80, rows: measure?.terminal.rows ?? 24, idempotencyKey: crypto.randomUUID() }),
 			});
 			sessions = [...sessions, session]; activeId = session.id;
-			await tick(); await attach(session);
+			await tick();
+			if (!loading) await attach(session);
 		} catch (reason) { error = reason instanceof Error ? reason.message : "Unable to create terminal."; }
 		finally { creating = false; }
 	}
