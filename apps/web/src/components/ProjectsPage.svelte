@@ -1,5 +1,6 @@
 <script lang="ts">
 import {
+	Check,
 	ChevronDown,
 	CircleHelp,
 	Columns3,
@@ -7,9 +8,10 @@ import {
 	FileDiff as FileDiffIcon,
 	Folder,
 	FolderPlus,
+	Gauge,
 	GitBranch,
 	GitPullRequest,
-	Gauge,
+	ListTree,
 	LoaderCircle,
 	MessageSquare,
 	MessageSquarePlus,
@@ -20,6 +22,7 @@ import {
 	Settings,
 	ShieldCheck,
 	Sparkles,
+	Star,
 	Trash2,
 	TriangleAlert,
 	X,
@@ -39,9 +42,11 @@ import {
 import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
 import { Badge } from "$lib/components/ui/badge";
 import { Button } from "$lib/components/ui/button";
+import * as Command from "$lib/components/ui/command";
 import * as Dialog from "$lib/components/ui/dialog";
 import { Input } from "$lib/components/ui/input";
 import * as Marker from "$lib/components/ui/marker";
+import * as Popover from "$lib/components/ui/popover";
 import * as Select from "$lib/components/ui/select";
 import * as Tabs from "$lib/components/ui/tabs";
 import {
@@ -50,6 +55,9 @@ import {
 	type ProjectGitOverview,
 	type ProjectPullRequests,
 	type Task,
+	type WalkthroughDocument,
+	type WalkthroughLanguage,
+	type WalkthroughSnapshot,
 } from "$lib/daemon";
 import AddProjectForm from "./AddProjectForm.svelte";
 import Composer from "./chat/Composer.svelte";
@@ -117,10 +125,48 @@ let fileError = $state("");
 let fileName = $state("");
 let fileContent = $state("");
 let diffs = $state<FileDiff[]>([]);
-type ChatPanel = "context" | "git" | "pull-requests" | "changes";
+type ChatPanel =
+	| "context"
+	| "git"
+	| "pull-requests"
+	| "changes"
+	| "walkthrough";
 let activePanel = $state<ChatPanel | null>(null);
 let gitOverview = $state<ProjectGitOverview | null>(null);
 let pullRequestData = $state<ProjectPullRequests | null>(null);
+let walkthroughSnapshot = $state<WalkthroughSnapshot | null>(null);
+let walkthroughProjectId = $state("");
+let walkthroughDocument = $state<WalkthroughDocument | null>(null);
+let walkthroughDocumentFingerprint = $state("");
+let walkthroughLanguage = $state<WalkthroughLanguage>("en");
+let walkthroughStepId = $state("");
+let walkthroughModelOpen = $state(false);
+let walkthroughModelSearch = $state("");
+const walkthroughFavoritesKey = "loom.chat.favoriteModels";
+const walkthroughRecentsKey = "loom.chat.recentModels";
+function readWalkthroughModelKeys(key: string) {
+	if (typeof localStorage === "undefined") return [];
+	try {
+		const value: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+		return Array.isArray(value)
+			? [
+					...new Set(
+						value.filter((item): item is string => typeof item === "string"),
+					),
+				].slice(0, 12)
+			: [];
+	} catch {
+		return [];
+	}
+}
+let walkthroughFavoriteModelIds = $state(
+	readWalkthroughModelKeys(walkthroughFavoritesKey),
+);
+let walkthroughRecentModelIds = $state(
+	readWalkthroughModelKeys(walkthroughRecentsKey),
+);
+let walkthroughGenerating = $state(false);
+let walkthroughError = $state("");
 let panelLoading = $state(false);
 let panelError = $state("");
 let panelRequest = 0;
@@ -157,7 +203,9 @@ const turns = $derived.by(() => {
 	return groups;
 });
 const assistantMessages = $derived(
-	(conversation?.messages ?? []).filter((message) => message.info.role === "assistant"),
+	(conversation?.messages ?? []).filter(
+		(message) => message.info.role === "assistant",
+	),
 );
 const latestUsageMessage = $derived(
 	assistantMessages.findLast((message) => message.info.tokens),
@@ -196,7 +244,7 @@ const contextModel = $derived(
 				(item) =>
 					item.providerID === latestUsageMessage.info.providerID &&
 					item.modelID === latestUsageMessage.info.modelID,
-				)
+			)
 		: undefined,
 );
 const contextTokens = $derived(
@@ -213,8 +261,9 @@ const selectedCustomAgent = $derived(
 );
 const activeProvider = $derived(
 	selectedCustomAgent?.provider ??
-		catalog.models.find((item) => `${item.providerID}/${item.modelID}` === model)
-			?.providerID ??
+		catalog.models.find(
+			(item) => `${item.providerID}/${item.modelID}` === model,
+		)?.providerID ??
 		(model.split("/")[0] || "opencode"),
 );
 $effect(() => {
@@ -235,10 +284,7 @@ $effect(() => {
 		if (openCodeModel) model = `opencode/${openCodeModel.modelID}`;
 		return;
 	}
-	if (
-		providerModels.some((item) => item.modelID === selectedId)
-	)
-		return;
+	if (providerModels.some((item) => item.modelID === selectedId)) return;
 	const canonical = providerModels.find(
 		(item) =>
 			item.name.toLowerCase() === selectedId.toLowerCase() ||
@@ -266,6 +312,149 @@ const filteredSessions = $derived(
 );
 const selectedDiff = $derived(
 	diffs.find((d) => d.file === fileName || fileName.endsWith(`/${d.file}`)),
+);
+const walkthroughSteps = $derived.by(() =>
+	(walkthroughDocument?.groups ?? []).flatMap((group) =>
+		group.steps.map((step) => ({ ...step, groupTitle: group.title })),
+	),
+);
+const selectedWalkthroughStep = $derived(
+	walkthroughSteps.find((step) => step.id === walkthroughStepId) ??
+		walkthroughSteps[0],
+);
+const walkthroughEvidence = $derived.by(() => {
+	const ids = new Set([
+		...(selectedWalkthroughStep?.evidenceIds ?? []),
+		...(selectedWalkthroughStep?.cautions ?? []).flatMap(
+			(item) => item.evidenceIds,
+		),
+	]);
+	return (walkthroughSnapshot?.files ?? []).filter((item) => ids.has(item.id));
+});
+type WalkthroughModel = Catalog["models"][number];
+function walkthroughModelKey(item: WalkthroughModel) {
+	return `${item.providerID}/${item.modelID}`;
+}
+function walkthroughProviderTone(providerID: string) {
+	const id = providerID.toLowerCase();
+	if (["agy", "antigravity", "gemini"].includes(id)) return "agy";
+	if (["claude", "anthropic"].includes(id)) return "claude";
+	if (["codex", "openai"].includes(id)) return "codex";
+	if (id === "opencode") return "opencode";
+	return "default";
+}
+const walkthroughModelsByKey = $derived(
+	new Map(catalog.models.map((item) => [walkthroughModelKey(item), item])),
+);
+function walkthroughModelsFor(keys: string[]) {
+	return keys
+		.map((key) => walkthroughModelsByKey.get(key))
+		.filter((item): item is WalkthroughModel => !!item);
+}
+const walkthroughFavoriteModels = $derived(
+	walkthroughModelsFor(walkthroughFavoriteModelIds),
+);
+const walkthroughRecentModels = $derived(
+	walkthroughModelsFor(walkthroughRecentModelIds),
+);
+const walkthroughProviderGroups = $derived.by(() => {
+	const groups = new Map<
+		string,
+		{ id: string; label: string; models: WalkthroughModel[] }
+	>();
+	for (const item of catalog.models) {
+		let group = groups.get(item.providerID);
+		if (!group) {
+			const label = item.provider?.trim();
+			group = {
+				id: item.providerID,
+				label:
+					label && label.toLowerCase() !== item.providerID.toLowerCase()
+						? `${label} · ${item.providerID}`
+						: item.providerID,
+				models: [],
+			};
+			groups.set(item.providerID, group);
+		}
+		if (
+			!group.models.some(
+				(modelItem) =>
+					walkthroughModelKey(modelItem) === walkthroughModelKey(item),
+			)
+		)
+			group.models.push(item);
+	}
+	const matches = (item: WalkthroughModel, section: string) => {
+		const query = walkthroughModelSearch.trim().toLowerCase();
+		return (
+			!query ||
+			`${section} ${item.name} ${item.provider} ${item.providerID} ${item.modelID} ${walkthroughModelKey(item)}`
+				.toLowerCase()
+				.includes(query)
+		);
+	};
+	return [...groups.values()]
+		.map((group) => ({
+			...group,
+			models: group.models.filter((item) => matches(item, group.id)),
+		}))
+		.filter((group) => group.models.length)
+		.sort((a, b) => a.label.localeCompare(b.label));
+});
+const visibleWalkthroughFavorites = $derived(
+	walkthroughFavoriteModels.filter((item) => {
+		const query = walkthroughModelSearch.trim().toLowerCase();
+		return (
+			!query ||
+			`${item.name} ${item.provider} ${item.providerID} ${item.modelID}`
+				.toLowerCase()
+				.includes(query)
+		);
+	}),
+);
+const visibleWalkthroughRecents = $derived(
+	walkthroughRecentModels.filter((item) => {
+		const query = walkthroughModelSearch.trim().toLowerCase();
+		return (
+			!query ||
+			`${item.name} ${item.provider} ${item.providerID} ${item.modelID}`
+				.toLowerCase()
+				.includes(query)
+		);
+	}),
+);
+function chooseWalkthroughModel(item: WalkthroughModel) {
+	const key = walkthroughModelKey(item);
+	model = key;
+	walkthroughRecentModelIds = [
+		key,
+		...walkthroughRecentModelIds.filter((id) => id !== key),
+	].slice(0, 8);
+	try {
+		localStorage.setItem(
+			walkthroughRecentsKey,
+			JSON.stringify(walkthroughRecentModelIds),
+		);
+	} catch {}
+	walkthroughModelSearch = "";
+	walkthroughModelOpen = false;
+}
+function toggleWalkthroughFavorite(item: WalkthroughModel) {
+	const key = walkthroughModelKey(item);
+	walkthroughFavoriteModelIds = walkthroughFavoriteModelIds.includes(key)
+		? walkthroughFavoriteModelIds.filter((id) => id !== key)
+		: [key, ...walkthroughFavoriteModelIds].slice(0, 12);
+	try {
+		localStorage.setItem(
+			walkthroughFavoritesKey,
+			JSON.stringify(walkthroughFavoriteModelIds),
+		);
+	} catch {}
+}
+const walkthroughStale = $derived(
+	!!walkthroughDocument &&
+		!!walkthroughSnapshot &&
+		walkthroughDocumentFingerprint !== walkthroughSnapshot.fingerprint,
 );
 const prompts = [
 	{
@@ -380,8 +569,7 @@ async function selectSession(id: string) {
 			model = openCodeModel
 				? `opencode/${openCodeModel.modelID}`
 				: `${recent.providerID}/${recent.modelID}`;
-		}
-		else model = preferredModel(selectedProjectId);
+		} else model = preferredModel(selectedProjectId);
 		if (recent?.agent) agent = recent.agent;
 	} catch (reason) {
 		if (id === sessionId) report(reason);
@@ -559,7 +747,10 @@ async function showPanel(panel: ChatPanel, force = false) {
 	const currentSession = sessionId;
 	panelLoading = false;
 	if (panel === "context") return;
-	if ((panel === "git" || panel === "pull-requests") && !projectId) {
+	if (
+		(panel === "git" || panel === "pull-requests" || panel === "walkthrough") &&
+		!projectId
+	) {
 		panelError = "Choose a project to inspect repository details.";
 		return;
 	}
@@ -575,6 +766,17 @@ async function showPanel(panel: ChatPanel, force = false) {
 			const result = await daemon.getProjectPullRequests(projectId);
 			if (request === panelRequest && projectId === selectedProjectId)
 				pullRequestData = result;
+		} else if (panel === "walkthrough") {
+			if (walkthroughProjectId !== projectId) {
+				walkthroughProjectId = projectId;
+				walkthroughSnapshot = null;
+				walkthroughDocument = null;
+				walkthroughDocumentFingerprint = "";
+				walkthroughStepId = "";
+			}
+			const result = await daemon.getProjectWalkthroughSnapshot(projectId);
+			if (request === panelRequest && projectId === selectedProjectId)
+				walkthroughSnapshot = result.snapshot;
 		} else {
 			diffs = [];
 			const result = currentSession ? await chat.diff(currentSession) : [];
@@ -587,10 +789,69 @@ async function showPanel(panel: ChatPanel, force = false) {
 		}
 	} catch (reason) {
 		if (request === panelRequest)
-			panelError = reason instanceof Error ? reason.message : "Unable to load panel data";
+			panelError =
+				reason instanceof Error ? reason.message : "Unable to load panel data";
 	} finally {
 		if (request === panelRequest) panelLoading = false;
 	}
+}
+async function generateWalkthrough() {
+	if (!selectedProjectId || !model || walkthroughGenerating) return;
+	const projectId = selectedProjectId;
+	const slash = model.indexOf("/");
+	if (slash <= 0 || slash === model.length - 1) {
+		walkthroughError = "Choose a provider model in the chat composer first.";
+		return;
+	}
+	const selected = {
+		providerId: model.slice(0, slash),
+		modelId: model.slice(slash + 1),
+	};
+	walkthroughGenerating = true;
+	walkthroughError = "";
+	try {
+		const result = await daemon.generateProjectWalkthrough(projectId, {
+			language: walkthroughLanguage,
+			model: selected,
+		});
+		walkthroughProjectId = projectId;
+		walkthroughSnapshot = result.snapshot;
+		let document = result.document;
+		if (result.status === "running" && result.runId) {
+			while (true) {
+				await new Promise((resolve) => setTimeout(resolve, 1000));
+				const progress = await daemon.getProjectWalkthroughRun(
+					projectId,
+					result.runId,
+				);
+				if (progress.status === "failed")
+					throw new Error(progress.error || "Unable to generate walkthrough.");
+				if (progress.status === "completed") {
+					document = progress.document;
+					break;
+				}
+			}
+		}
+		walkthroughDocument = document;
+		walkthroughDocumentFingerprint = document
+			? result.snapshot.fingerprint
+			: "";
+		walkthroughStepId = document?.groups[0]?.steps[0]?.id ?? "";
+	} catch (reason) {
+		walkthroughError =
+			reason instanceof Error
+				? reason.message
+				: "Unable to generate walkthrough.";
+	} finally {
+		walkthroughGenerating = false;
+	}
+}
+function moveWalkthroughStep(direction: -1 | 1) {
+	const index = walkthroughSteps.findIndex(
+		(step) => step.id === (selectedWalkthroughStep?.id ?? ""),
+	);
+	const next = walkthroughSteps[index + direction];
+	if (next) walkthroughStepId = next.id;
 }
 async function send(input: Parameters<typeof chat.send>[1]) {
 	if (!selectedProjectId || sending) return false;
@@ -783,6 +1044,29 @@ async function answer(requestId: string, answers: string[][]) {
 }
 </script>
 
+{#snippet walkthroughModelOption(item: WalkthroughModel, section: string)}
+	{@const key = walkthroughModelKey(item)}
+	{@const favorite = walkthroughFavoriteModelIds.includes(key)}
+	<div class="flex items-center gap-1">
+		<Command.Item
+			value={`${section} ${item.name} ${item.provider} ${item.providerID} ${item.modelID} ${key}`}
+			onSelect={() => chooseWalkthroughModel(item)}
+			class="h-12 min-w-0 flex-1 items-center"
+		>
+			<span class="min-w-0 flex-1">
+				<span class="flex min-w-0 items-center gap-2">
+					<span class="truncate">{item.name}</span>
+					<Badge variant="outline" class={`model-badge model-badge--${walkthroughProviderTone(item.providerID)} shrink-0 px-1.5 text-[10px] uppercase tracking-wide`}>{item.providerID}</Badge>
+				</span>
+				<span class="block truncate text-xs text-muted-foreground">{item.modelID}{item.connectionId && item.connectionId !== item.providerID ? ` · ${item.connectionId}` : ""}</span>
+			</span>
+		</Command.Item>
+		<Button type="button" variant="ghost" size="icon" class="size-8 shrink-0" aria-label={favorite ? `Remove ${item.name} from favorites` : `Add ${item.name} to favorites`} title={favorite ? "Remove from favorites" : "Add to favorites"} onclick={() => toggleWalkthroughFavorite(item)}>
+			<Star class={favorite ? "size-4 fill-amber-400 text-amber-400" : "size-4 text-muted-foreground"} />
+		</Button>
+	</div>
+{/snippet}
+
 <svelte:head><title>{conversation?.session.title ? `${conversation.session.title} · Loom` : "Loom · Workspace"}</title></svelte:head>
 <div class="flex h-svh overflow-hidden bg-background text-foreground">
   {#if sidebarOpen}
@@ -865,9 +1149,9 @@ async function answer(requestId: string, answers: string[][]) {
     {#if sessionId && viewMode === "chat"}<div class="shrink-0 border-t bg-background px-5 py-4"><div class="mx-auto max-w-3xl"><Composer projectId={selectedProjectId} {catalog} {customAgents} {busy} disabled={!conversation || sessionLoading} onsend={send} onstop={stop} bind:draft bind:model bind:agent bind:customAgentId autoAccept={selectedProject?.autoAccept ?? false} onAutoAcceptChange={selectedProject ? (value) => void setAutoAccept(value) : undefined} /></div></div>{/if}
     </div>
     {#if activePanel}
-      <aside class="flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]" aria-label={`${activePanel} panel`}>
+      <aside class={activePanel === "walkthrough" ? "flex w-[min(850px,76vw)] shrink-0 flex-col border-l bg-card/30" : "flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]"} aria-label={`${activePanel} panel`}>
         <div class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-          <p class="min-w-0 flex-1 truncate text-sm font-medium">{activePanel === "context" ? "Context usage" : activePanel === "git" ? "Git" : activePanel === "pull-requests" ? "Pull requests" : "Changes"}</p>
+          <p class="min-w-0 flex-1 truncate text-sm font-medium">{activePanel === "context" ? "Context usage" : activePanel === "git" ? "Git" : activePanel === "pull-requests" ? "Pull requests" : activePanel === "walkthrough" ? "Walkthrough" : "Changes"}</p>
           {#if activePanel !== "context"}<Button variant="ghost" size="icon" class="size-7" aria-label="Refresh panel" title="Refresh" onclick={() => void showPanel(activePanel!, true)} disabled={panelLoading}><RefreshCw size={13} class={panelLoading ? "animate-spin" : ""} /></Button>{/if}
         </div>
         <div class="nice-scroll min-h-0 flex-1 overflow-y-auto p-4">
@@ -914,6 +1198,58 @@ async function answer(requestId: string, answers: string[][]) {
             {:else if !panelLoading}<p class="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">Repository details are unavailable.</p>{/if}
           {:else if activePanel === "pull-requests"}
             {#if panelLoading && !pullRequestData}<div class="flex items-center gap-2 py-8 text-xs text-muted-foreground"><LoaderCircle size={14} class="animate-spin" />Loading pull requests…</div>{:else if pullRequestData?.available && pullRequestData.pullRequests.length}<div class="flex flex-col gap-2">{#each pullRequestData.pullRequests as pr (pr.number)}<a href={pr.url} target="_blank" rel="noreferrer" class="block rounded-lg border bg-card/50 p-3 transition hover:border-primary/40 hover:bg-accent/30"><div class="flex items-center gap-2"><Badge variant="outline" class="shrink-0">#{pr.number}</Badge><span class="truncate text-[11px] text-muted-foreground">{pr.state}</span></div><p class="mt-2 text-sm font-medium leading-5">{pr.title}</p><p class="mt-1 truncate font-mono text-[10px] text-muted-foreground">{pr.headRefName}</p></a>{/each}</div>{:else if pullRequestData?.available}<p class="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No open pull requests found for this repository.</p>{:else if pullRequestData?.message}<section class="flex flex-col gap-3 rounded-lg border border-dashed p-4"><GitPullRequest size={17} class="text-muted-foreground" /><p class="text-xs leading-5 text-muted-foreground">{pullRequestData.message}</p><p class="text-[11px] leading-5 text-muted-foreground">Install and authenticate GitHub CLI with <code class="rounded bg-muted px-1 py-0.5">gh auth login</code> to load pull requests.</p></section>{/if}
+          {:else if activePanel === "walkthrough"}
+            <div class="flex min-h-full flex-col gap-3">
+              {#if panelLoading && !walkthroughSnapshot}<div role="status" class="flex items-center gap-2 py-8 text-xs text-muted-foreground"><LoaderCircle size={14} class="animate-spin" />Capturing repository changes…</div>{/if}
+              {#if walkthroughError}<p role="alert" class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{walkthroughError}</p>{/if}
+              <div class="flex flex-wrap items-center gap-2 rounded-lg border bg-card/50 p-2">
+                <Badge variant="outline" class="gap-1"><FileDiffIcon size={12} />All uncommitted</Badge>
+                <Select.Root type="single" bind:value={walkthroughLanguage}>
+                  <Select.Trigger class="h-8 w-auto min-w-[130px] gap-2 border-0 bg-transparent px-2 text-xs shadow-none" aria-label="Walkthrough language">{walkthroughLanguage === "en" ? "English" : "Bahasa Indonesia"}</Select.Trigger>
+                  <Select.Content><Select.Item value="en">English</Select.Item><Select.Item value="id">Bahasa Indonesia</Select.Item></Select.Content>
+                </Select.Root>
+                <Popover.Root bind:open={walkthroughModelOpen} onOpenChange={(open) => { walkthroughModelOpen = open; if (open) { walkthroughFavoriteModelIds = readWalkthroughModelKeys(walkthroughFavoritesKey); walkthroughRecentModelIds = readWalkthroughModelKeys(walkthroughRecentsKey); } else walkthroughModelSearch = ""; }}>
+                  <Popover.Trigger class="flex h-8 min-w-[160px] max-w-[260px] flex-1 items-center justify-between gap-2 rounded-md px-2 text-xs transition hover:bg-accent/50" aria-label="Walkthrough model"><span class="truncate">{catalog.models.find((item) => `${item.providerID}/${item.modelID}` === model)?.name ?? "Select chat model"}</span><ChevronDown size={12} class="shrink-0 text-muted-foreground" /></Popover.Trigger>
+                  <Popover.Content class="w-96 max-w-[calc(100vw-2rem)] p-0" align="end">
+                    <Command.Root>
+                      <Command.Input bind:value={walkthroughModelSearch} placeholder="Search models…" />
+                      <Command.List class="max-h-96"><Command.Empty>No configured models found.</Command.Empty>
+                        {#if visibleWalkthroughFavorites.length}<Command.Group heading="Favorites">{#each visibleWalkthroughFavorites as item (walkthroughModelKey(item))}{@render walkthroughModelOption(item, "favorite")}{/each}</Command.Group>{/if}
+                        {#if visibleWalkthroughRecents.length}<Command.Separator /><Command.Group heading="Recent">{#each visibleWalkthroughRecents as item (walkthroughModelKey(item))}{@render walkthroughModelOption(item, "recent")}{/each}</Command.Group>{/if}
+                        {#each walkthroughProviderGroups as group (group.id)}<Command.Separator /><Command.Group heading={group.label}>{#each group.models as item (walkthroughModelKey(item))}{@render walkthroughModelOption(item, group.id)}{/each}</Command.Group>{/each}
+                      </Command.List>
+                    </Command.Root>
+                  </Popover.Content>
+                </Popover.Root>
+                {#if walkthroughDocument}<Button variant="outline" size="icon" class="size-8" aria-label="Previous walkthrough step" title="Previous step" onclick={() => moveWalkthroughStep(-1)} disabled={walkthroughSteps.findIndex((step) => step.id === selectedWalkthroughStep?.id) <= 0}><ChevronDown size={14} class="rotate-90" /></Button><Button variant="outline" size="icon" class="size-8" aria-label="Next walkthrough step" title="Next step" onclick={() => moveWalkthroughStep(1)} disabled={walkthroughSteps.findIndex((step) => step.id === selectedWalkthroughStep?.id) >= walkthroughSteps.length - 1}><ChevronDown size={14} class="-rotate-90" /></Button>{/if}
+                <Button variant="outline" size="sm" class="h-8 gap-1.5 text-xs" onclick={() => void generateWalkthrough()} disabled={!model || walkthroughGenerating || !selectedProjectId}><RefreshCw size={13} class={walkthroughGenerating ? "animate-spin" : ""} />{walkthroughGenerating ? "Generating…" : walkthroughDocument ? "Regenerate" : "Generate"}</Button>
+              </div>
+              {#if walkthroughSnapshot?.coverage.truncated || (walkthroughSnapshot?.coverage.excludedFiles ?? 0) > 0 || (walkthroughSnapshot?.coverage.omittedFiles ?? 0) > 0}<p class="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[11px] leading-5 text-amber-100/75">Partial snapshot: {walkthroughSnapshot?.coverage.excludedFiles} sensitive or ignored files excluded{walkthroughSnapshot?.coverage.omittedFiles ? `, ${walkthroughSnapshot.coverage.omittedFiles} files beyond the limit` : ""}{walkthroughSnapshot?.coverage.message ? `. ${walkthroughSnapshot.coverage.message}` : ""}</p>{/if}
+              {#if walkthroughStale}<p role="status" class="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-100/75">Files changed since this walkthrough was generated. Refresh the snapshot or regenerate.</p>{/if}
+              {#if walkthroughDocument?.limitations.length}<section class="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3"><h3 class="text-xs font-semibold text-amber-200">Coverage limitations</h3><ul class="mt-2 list-disc space-y-1 pl-4 text-xs leading-5 text-amber-100/75">{#each walkthroughDocument.limitations as limitation}<li>{limitation}</li>{/each}</ul></section>{/if}
+              <p class="text-[10px] leading-4 text-muted-foreground">Generating sends the bounded text diff snapshot to the selected model with read-only permissions. Sensitive filenames and binary files are excluded.</p>
+              {#if !selectedProjectId}<p class="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">Choose a project to review uncommitted changes.</p>
+              {:else if !walkthroughSnapshot && !panelLoading}<p class="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">Choose Walkthrough to capture this project’s changes.</p>
+              {:else if walkthroughSnapshot && !walkthroughSnapshot.files.length}<div class="rounded-lg border border-dashed p-7 text-center"><ListTree size={20} class="mx-auto text-muted-foreground" /><p class="mt-2 text-sm font-medium">No uncommitted changes</p><p class="mt-1 text-xs text-muted-foreground">There are no changed text files to explain yet.</p></div>
+              {:else if walkthroughSnapshot}<div class="grid min-h-[420px] flex-1 grid-cols-[minmax(160px,220px)_minmax(0,1fr)] overflow-hidden rounded-xl border bg-background/50">
+                <nav class="nice-scroll overflow-y-auto border-r p-2" aria-label="Walkthrough steps">
+                  {#if walkthroughDocument}
+                    <div class="mb-3 px-2 pt-1"><p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{walkthroughDocument.groups.reduce((total, group) => total + group.steps.length, 0)} steps</p></div>
+                    {#each walkthroughDocument.groups as group (group.id)}<section class="mb-3"><p class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{group.title}</p>{#each group.steps as step, index (`${group.id}:${step.id}`)}<Button variant="ghost" class={`mb-1 h-auto w-full justify-start gap-2 whitespace-normal px-2 py-2 text-left ${selectedWalkthroughStep?.id === step.id ? "bg-accent text-accent-foreground" : "text-muted-foreground"}`} onclick={() => walkthroughStepId = step.id}><span class="grid size-5 shrink-0 place-items-center rounded-full border text-[10px]">{index + 1}</span><span class="line-clamp-2 min-w-0 text-xs leading-4">{step.title}</span></Button>{/each}</section>{/each}
+                  {:else}<div class="mb-2 px-2 pt-1"><p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Changed files</p></div>{#each walkthroughSnapshot.files as item (item.id)}<Button variant="ghost" class="h-auto w-full justify-start gap-2 px-2 py-2 text-left text-xs" onclick={() => { walkthroughStepId = item.id; }}><FileCode size={13} class="shrink-0" /><span class="min-w-0 truncate font-mono">{item.file}</span></Button>{/each}{/if}
+                </nav>
+                <div class="nice-scroll min-w-0 overflow-y-auto p-4 sm:p-5">
+                  {#if walkthroughDocument && selectedWalkthroughStep}
+                    <section class="mb-5 rounded-lg border bg-card/50 p-3"><p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Overview</p><p class="mt-1 text-xs leading-5 text-muted-foreground">{walkthroughDocument.summary}</p></section>
+                    <p class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-primary">{selectedWalkthroughStep.groupTitle}</p><h2 class="text-lg font-semibold leading-6">{selectedWalkthroughStep.title}</h2><p class="mt-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{selectedWalkthroughStep.explanation}</p>
+                    {#if selectedWalkthroughStep.observations.length}<section class="mt-5"><h3 class="text-xs font-semibold">What the change does</h3><ul class="mt-2 list-disc space-y-1 pl-4 text-xs leading-5 text-muted-foreground">{#each selectedWalkthroughStep.observations as observation}<li>{observation}</li>{/each}</ul></section>{/if}
+                    {#if selectedWalkthroughStep.cautions.length}<section class="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3"><h3 class="flex items-center gap-1.5 text-xs font-semibold text-amber-200"><TriangleAlert size={13} />Cautions</h3><ul class="mt-2 space-y-2 text-xs leading-5 text-amber-100/75">{#each selectedWalkthroughStep.cautions as caution}<li><Badge variant="outline" class="mr-1.5 text-[9px] uppercase">{caution.kind}</Badge>{caution.message}</li>{/each}</ul></section>{/if}
+                    {#each walkthroughEvidence as item (item.id)}<section class="mt-5 overflow-hidden rounded-lg border"><div class="flex items-center gap-2 border-b bg-card/70 px-3 py-2"><FileCode size={13} class="shrink-0 text-primary" /><span class="min-w-0 flex-1 truncate font-mono text-[11px]" title={item.file}>{item.file}</span><Badge variant="outline" class="font-mono text-[9px]">{item.status}</Badge>{#if item.truncated}<Badge variant="secondary" class="text-[9px]">Partial</Badge>{/if}</div><pre class="nice-scroll max-h-[420px] overflow-auto bg-background py-2 text-[10px] leading-[1.45rem]">{#each item.patch.split("\n") as line}<div class={`min-h-6 whitespace-pre px-3 ${line.startsWith("+") ? "bg-emerald-500/10 text-emerald-300" : line.startsWith("-") ? "bg-red-500/10 text-red-300" : line.startsWith("@@") ? "bg-blue-500/10 text-blue-300" : "text-muted-foreground"}`}>{line || " "}</div>{/each}</pre></section>{/each}
+                  {:else if walkthroughDocument}<h2 class="text-lg font-semibold">{walkthroughDocument.title}</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">{walkthroughDocument.summary}</p><p class="mt-5 text-xs text-muted-foreground">Select a step to inspect its evidence.</p>
+                  {:else}<div class="rounded-lg border border-dashed p-6 text-center"><FileDiffIcon size={18} class="mx-auto text-muted-foreground" /><h2 class="mt-2 text-sm font-medium">Snapshot ready</h2><p class="mt-1 text-xs leading-5 text-muted-foreground">Select the same model as Chat and generate a guided explanation. The diff remains available here even if generation fails.</p></div>{#each walkthroughSnapshot.files as item (item.id)}<section class="mt-3 overflow-hidden rounded-lg border"><div class="flex items-center gap-2 border-b bg-card/70 px-3 py-2"><FileCode size={13} /><span class="min-w-0 flex-1 truncate font-mono text-[11px]">{item.file}</span><Badge variant="outline" class="font-mono text-[9px]">{item.status}</Badge></div><pre class="nice-scroll max-h-64 overflow-auto bg-background py-2 text-[10px] leading-[1.4rem]">{#each item.patch.split("\n") as line}<div class={`whitespace-pre px-3 ${line.startsWith("+") ? "bg-emerald-500/10 text-emerald-300" : line.startsWith("-") ? "bg-red-500/10 text-red-300" : "text-muted-foreground"}`}>{line || " "}</div>{/each}</pre></section>{/each}{/if}
+                </div>
+              </div>{/if}
+            </div>
           {:else}
             <section>
               <div class="mb-3 flex items-center justify-between"><p class="text-xs font-medium">Session changes</p><Badge variant="outline">{diffs.length}</Badge></div>
@@ -931,6 +1267,7 @@ async function answer(requestId: string, answers: string[][]) {
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "git" ? "text-primary" : "text-muted-foreground"}`} aria-label="Git status" title="Git status" aria-pressed={activePanel === "git"} onclick={() => void showPanel("git")}><GitBranch size={16} /></Button>
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "pull-requests" ? "text-primary" : "text-muted-foreground"}`} aria-label="Pull requests" title="Pull requests" aria-pressed={activePanel === "pull-requests"} onclick={() => void showPanel("pull-requests")}><GitPullRequest size={16} /></Button>
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "changes" ? "text-primary" : "text-muted-foreground"}`} aria-label="Changed files" title="Changed files" aria-pressed={activePanel === "changes"} onclick={() => void showPanel("changes")}><FileDiffIcon size={16} /></Button>
+      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "walkthrough" ? "text-primary" : "text-muted-foreground"}`} aria-label="Walkthrough" title="Walkthrough" aria-pressed={activePanel === "walkthrough"} onclick={() => void showPanel("walkthrough")}><ListTree size={16} /></Button>
     </nav>
     </div>
     {/if}

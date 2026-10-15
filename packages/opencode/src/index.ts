@@ -53,6 +53,7 @@ export type AgentRuntime = {
 	prompt(input: {
 		sessionId: string;
 		prompt: string;
+		system?: string;
 		model?: AgentModel;
 		images?: Array<{ mime: string; data: string }>;
 	}): Promise<void>;
@@ -70,6 +71,7 @@ export type AgentRuntime = {
 		Exclude<AgentRunStatus, "queued" | "running" | "waiting_permission">
 	>;
 	abort(sessionId: string): Promise<void>;
+	deleteSession?(sessionId: string): Promise<void>;
 	getDiff(sessionId: string): Promise<unknown>;
 };
 
@@ -352,7 +354,11 @@ export class OpenCodeHttpRuntime implements AgentRuntime {
 				// Denying just `edit` keeps the canvas/planner read-only while
 				// leaving free-tier models usable.
 				...(input.readOnly
-					? { permission: [{ permission: "edit", pattern: "*", action: "deny" }] }
+					? {
+							permission: [
+								{ permission: "edit", pattern: "*", action: "deny" },
+							],
+						}
 					: {}),
 			}),
 		});
@@ -364,6 +370,7 @@ export class OpenCodeHttpRuntime implements AgentRuntime {
 	async prompt(input: {
 		sessionId: string;
 		prompt: string;
+		system?: string;
 		model?: AgentModel;
 		images?: Array<{ mime: string; data: string }>;
 	}): Promise<void> {
@@ -374,6 +381,7 @@ export class OpenCodeHttpRuntime implements AgentRuntime {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
+					...(input.system ? { system: input.system } : {}),
 					...(input.model
 						? {
 								model: {
@@ -473,6 +481,15 @@ export class OpenCodeHttpRuntime implements AgentRuntime {
 			method: "POST",
 		});
 		this.cancelled.add(sessionId);
+	}
+
+	async deleteSession(sessionId: string): Promise<void> {
+		await this.request(`/session/${encodeURIComponent(sessionId)}`, {
+			method: "DELETE",
+		});
+		this.directories.delete(sessionId);
+		this.cancelled.delete(sessionId);
+		this.lastErrors.delete(sessionId);
 	}
 
 	async readOutput(sessionId: string): Promise<RuntimeOutput | null> {

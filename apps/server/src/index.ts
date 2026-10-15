@@ -65,6 +65,7 @@ import {
 import {
 	createDefaultProviderRegistry,
 	ProviderManager,
+	readPrompt,
 } from "@loom/providers";
 import type { AgentModel, AgentRuntime } from "@loom/providers/core";
 import {
@@ -95,8 +96,100 @@ import {
 	ProjectValidationError,
 } from "./projects";
 import { auth, checkDbHealth, getDb } from "./services";
+import { collectWalkthroughSnapshot } from "./walkthrough";
 
 const { upgradeWebSocket, websocket: bunWebSocket } = createBunWebSocket();
+
+const walkthroughDocumentSchema = z.object({
+	schemaVersion: z.literal(1),
+	title: z.string().trim().min(1).max(180),
+	summary: z.string().trim().min(1).max(4000),
+	groups: z
+		.array(
+			z.object({
+				id: z.string().min(1).max(100),
+				title: z.string().trim().min(1).max(180),
+				steps: z
+					.array(
+						z.object({
+							id: z.string().min(1).max(100),
+							title: z.string().trim().min(1).max(180),
+							explanation: z.string().trim().min(1).max(4000),
+							evidenceIds: z.array(z.string().min(1).max(100)).min(1).max(30),
+							observations: z.array(z.string().max(1000)).max(12).default([]),
+							cautions: z
+								.array(
+									z.object({
+										kind: z.enum(["observed", "inferred", "unverified"]),
+										message: z.string().trim().min(1).max(1000),
+										evidenceIds: z.array(z.string().min(1).max(100)).max(30),
+									}),
+								)
+								.max(12)
+								.default([]),
+						}),
+					)
+					.min(1)
+					.max(30),
+			}),
+		)
+		.max(20),
+	limitations: z.array(z.string().trim().min(1).max(1000)).max(20).default([]),
+});
+
+type WalkthroughRun = {
+	projectId: string;
+	startedAt: number;
+	evidenceIds: string[];
+	provider: { providerId: string; modelId: string };
+	status: "running" | "completed" | "failed";
+	document?: z.infer<typeof walkthroughDocumentSchema> | null;
+	error?: string;
+};
+
+function parseWalkthroughOutput(
+	output: { output: string; truncated?: boolean } | null,
+	evidenceIds: string[],
+) {
+	if (!output?.output.trim())
+		throw new Error("The selected provider returned an empty walkthrough.");
+	if (output.truncated)
+		throw new Error(
+			"The selected provider response was truncated; retry with a smaller snapshot.",
+		);
+	if (output.output.length > 64_000)
+		throw new Error("The walkthrough response exceeded the 64 KiB limit.");
+	const raw = output.output
+		.trim()
+		.replace(/^```(?:json)?\s*/i, "")
+		.replace(/\s*```$/, "");
+	const document = walkthroughDocumentSchema.parse(JSON.parse(raw));
+	const allowedEvidence = new Set(evidenceIds);
+	const generatedIds = new Set<string>();
+	for (const group of document.groups) {
+		if (generatedIds.has(group.id))
+			throw new Error("The generated walkthrough contains duplicate IDs.");
+		generatedIds.add(group.id);
+		for (const step of group.steps) {
+			if (generatedIds.has(step.id))
+				throw new Error("The generated walkthrough contains duplicate IDs.");
+			generatedIds.add(step.id);
+			if (step.evidenceIds.some((id) => !allowedEvidence.has(id)))
+				throw new Error(
+					"The generated walkthrough referenced evidence outside the captured snapshot.",
+				);
+			if (
+				step.cautions.some((caution) =>
+					caution.evidenceIds.some((id) => !allowedEvidence.has(id)),
+				)
+			)
+				throw new Error(
+					"The generated walkthrough referenced evidence outside the captured snapshot.",
+				);
+		}
+	}
+	return document;
+}
 
 async function jsonBody(c: { req: { json: () => Promise<unknown> } }) {
 	try {
@@ -124,7 +217,11 @@ async function runWorkspaceCommand(
 			new Response(child.stdout).text(),
 			new Response(child.stderr).text(),
 		]);
-		return { exitCode, stdout: stdout.slice(0, 500_000), stderr: stderr.slice(0, 20_000) };
+		return {
+			exitCode,
+			stdout: stdout.slice(0, 500_000),
+			stderr: stderr.slice(0, 20_000),
+		};
 	} finally {
 		clearTimeout(timeout);
 	}
@@ -397,16 +494,18 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		const cached = JSON.parse(await readFile(providerModelCachePath, "utf8"));
 		const cachedModels = z
 			.array(
-				z.object({
-					id: z.string(),
-					providerId: z.string(),
-					connectionId: z.string(),
-					name: z.string(),
-					displayName: z.string(),
-					capabilities: z.array(z.string()),
-					isAvailable: z.boolean(),
-					metadata: z.record(z.string(), z.unknown()).optional(),
-				}).passthrough(),
+				z
+					.object({
+						id: z.string(),
+						providerId: z.string(),
+						connectionId: z.string(),
+						name: z.string(),
+						displayName: z.string(),
+						capabilities: z.array(z.string()),
+						isAvailable: z.boolean(),
+						metadata: z.record(z.string(), z.unknown()).optional(),
+					})
+					.passthrough(),
 			)
 			.safeParse(cached);
 		if (cachedModels.success)
@@ -430,7 +529,9 @@ export async function createApp(options: DaemonAppOptions = {}) {
 			),
 		);
 	};
-	let providerDiscovery: ReturnType<typeof providerManager.refreshAll> | undefined;
+	let providerDiscovery:
+		| ReturnType<typeof providerManager.refreshAll>
+		| undefined;
 	let providerModelBootstrap: Promise<void> | undefined;
 	const discoverProviders = () =>
 		(providerDiscovery ??= providerManager.refreshAll());
@@ -492,6 +593,7 @@ export async function createApp(options: DaemonAppOptions = {}) {
 	const projectValidation =
 		options.projectValidation ?? createProjectValidationService();
 	const app = new Hono();
+	const walkthroughRuns = new Map<string, WalkthroughRun>();
 	const allowedOrigins = new Set(
 		config.corsOrigin
 			.split(",")
@@ -952,18 +1054,44 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		try {
 			const repository = await projectValidation.validate(project.path);
 			const [status, diff, stagedDiff, remote] = await Promise.all([
-				runWorkspaceCommand("git", ["status", "--short", "--branch", "--untracked-files=all"], repository.path),
-				runWorkspaceCommand("git", ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--stat"], repository.path),
-				runWorkspaceCommand("git", ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--cached", "--stat"], repository.path),
-				runWorkspaceCommand("git", ["remote", "get-url", "origin"], repository.path),
+				runWorkspaceCommand(
+					"git",
+					["status", "--short", "--branch", "--untracked-files=all"],
+					repository.path,
+				),
+				runWorkspaceCommand(
+					"git",
+					["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--stat"],
+					repository.path,
+				),
+				runWorkspaceCommand(
+					"git",
+					[
+						"--no-pager",
+						"diff",
+						"--no-ext-diff",
+						"--no-textconv",
+						"--cached",
+						"--stat",
+					],
+					repository.path,
+				),
+				runWorkspaceCommand(
+					"git",
+					["remote", "get-url", "origin"],
+					repository.path,
+				),
 			]);
 			if (status.exitCode !== 0)
 				throw new Error(status.stderr.trim() || "Unable to read Git status");
 			const lines = status.stdout.trimEnd().split("\n");
-			const files = lines.slice(1).filter(Boolean).map((line) => ({
-				status: line.slice(0, 2).trim() || "?",
-				path: line.slice(3).split(" -> ").at(-1) ?? line.slice(3),
-			}));
+			const files = lines
+				.slice(1)
+				.filter(Boolean)
+				.map((line) => ({
+					status: line.slice(0, 2).trim() || "?",
+					path: line.slice(3).split(" -> ").at(-1) ?? line.slice(3),
+				}));
 			return c.json({
 				branch: lines[0]?.replace(/^##\s*/, "") || "Unknown branch",
 				defaultBranch: project.defaultBranch,
@@ -973,7 +1101,9 @@ export async function createApp(options: DaemonAppOptions = {}) {
 						: null,
 				files: files.slice(0, 300),
 				truncated: files.length > 300,
-				diffStat: [diff.stdout.trim(), stagedDiff.stdout.trim()].filter(Boolean).join("\n"),
+				diffStat: [diff.stdout.trim(), stagedDiff.stdout.trim()]
+					.filter(Boolean)
+					.join("\n"),
 			});
 		} catch (error) {
 			return errorResponse(c, error);
@@ -990,21 +1120,311 @@ export async function createApp(options: DaemonAppOptions = {}) {
 				repository.path,
 			);
 			const origin = remote.exitCode === 0 ? remote.stdout.trim() : "";
-			if (!/^(?:https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)/i.test(origin))
-				return c.json({ available: false, message: "Pull request listing is enabled for repositories hosted on github.com with an origin remote.", pullRequests: [] });
+			if (
+				!/^(?:https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)/i.test(
+					origin,
+				)
+			)
+				return c.json({
+					available: false,
+					message:
+						"Pull request listing is enabled for repositories hosted on github.com with an origin remote.",
+					pullRequests: [],
+				});
 			const result = await runWorkspaceCommand(
 				"gh",
-				["pr", "list", "--json", "number,title,url,state,headRefName", "--limit", "20"],
+				[
+					"pr",
+					"list",
+					"--json",
+					"number,title,url,state,headRefName",
+					"--limit",
+					"20",
+				],
 				repository.path,
 				8_000,
 			);
 			if (result.exitCode !== 0)
-				return c.json({ available: false, message: result.stderr.trim() || "GitHub CLI could not load pull requests.", pullRequests: [] });
-			return c.json({ available: true, message: null, pullRequests: JSON.parse(result.stdout) });
+				return c.json({
+					available: false,
+					message:
+						result.stderr.trim() || "GitHub CLI could not load pull requests.",
+					pullRequests: [],
+				});
+			return c.json({
+				available: true,
+				message: null,
+				pullRequests: JSON.parse(result.stdout),
+			});
 		} catch (error) {
-			const message = error instanceof Error ? error.message : "GitHub CLI is unavailable";
+			const message =
+				error instanceof Error ? error.message : "GitHub CLI is unavailable";
 			return c.json({ available: false, message, pullRequests: [] });
 		}
+	});
+	app.get("/api/projects/:id/walkthrough/snapshot", async (c) => {
+		const project = await repos.projects.getById(c.req.param("id"));
+		if (!project) return errorResponse(c, new Error("Project not found"));
+		try {
+			const repository = await projectValidation.validate(project.path);
+			return c.json({
+				snapshot: await collectWalkthroughSnapshot(repository.path),
+			});
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Unable to capture changes";
+			return c.json(
+				{ error: { message } },
+				message.startsWith("SNAPSHOT_UNSTABLE") ? 409 : 400,
+			);
+		}
+	});
+	app.post("/api/projects/:id/walkthrough", async (c) => {
+		const project = await repos.projects.getById(c.req.param("id"));
+		if (!project) return errorResponse(c, new Error("Project not found"));
+		if (
+			[...walkthroughRuns.values()].filter((run) => run.status === "running")
+				.length >= 8
+		)
+			return c.json(
+				{ error: { message: "Too many walkthroughs are already running." } },
+				429,
+			);
+		const input = z
+			.object({
+				language: z.enum(["en", "id"]),
+				model: z.object({
+					providerId: z.string().min(1).max(100),
+					modelId: z.string().min(1).max(300),
+				}),
+			})
+			.parse(await jsonBody(c));
+		const requestedProviderId = input.model.providerId;
+		const managedProvider =
+			requestedProviderId !== "opencode" &&
+			!!providerManager.registry.get(requestedProviderId);
+		const providerId = managedProvider
+			? providerManager.normalizeProviderId(requestedProviderId)
+			: requestedProviderId;
+		try {
+			const repository = await projectValidation.validate(project.path);
+			const snapshot = await collectWalkthroughSnapshot(repository.path);
+			if (!snapshot.files.length)
+				return c.json({
+					snapshot,
+					document: null,
+					runId: null,
+					status: "completed" as const,
+					provider: { providerId, modelId: input.model.modelId },
+				});
+			let candidate:
+				| ReturnType<typeof providerManager.catalog.listByProvider>[number]
+				| undefined;
+			if (managedProvider) {
+				const connection = providerManager.get(providerId);
+				if (connection?.status !== "connected")
+					return c.json(
+						{ error: { message: `Provider is not connected: ${providerId}` } },
+						409,
+					);
+				candidate = providerManager.catalog
+					.listByProvider(providerId)
+					.find((model) => {
+						const requested = input.model.modelId.toLowerCase();
+						return [
+							model.metadata?.modelId,
+							model.name,
+							model.displayName,
+						].some(
+							(value) =>
+								typeof value === "string" && value.toLowerCase() === requested,
+						);
+					});
+				if (!candidate)
+					return c.json(
+						{
+							error: {
+								message:
+									"The selected model is no longer available. Refresh the model list and try again.",
+							},
+						},
+						409,
+					);
+			}
+			const runtime = managedProvider
+				? providerManager.getRuntime(providerId)
+				: agentRuntime;
+			const runtimeModelId = String(
+				candidate?.metadata?.modelId ?? candidate?.name ?? input.model.modelId,
+			);
+			const runtimeModel =
+				providerId === "opencode"
+					? (() => {
+							const [upstreamProviderId, ...upstreamModelParts] =
+								runtimeModelId.split("/");
+							return {
+								providerID: upstreamProviderId || providerId,
+								modelID: upstreamModelParts.join("/") || runtimeModelId,
+							};
+						})()
+					: { providerID: providerId, modelID: input.model.modelId };
+			const systemPrompt = await readPrompt("review/walkthrough.md");
+			const created = await runtime.createSession({
+				cwd: repository.path,
+				title: "Loom change walkthrough",
+				readOnly: true,
+			});
+			const evidence = snapshot.files.map(
+				({ id, file, status, kind, patch, truncated }) => ({
+					id,
+					file,
+					status,
+					kind,
+					patch,
+					truncated,
+				}),
+			);
+			const prompt = JSON.stringify({
+				requestedOutputLanguage:
+					input.language === "en" ? "English" : "Indonesian",
+				snapshotIdentity: {
+					scope: snapshot.scope,
+					fingerprint: snapshot.fingerprint,
+					capturedAt: snapshot.capturedAt,
+				},
+				changedFileInventory: snapshot.files.map(
+					({ id, file, status, kind }) => ({
+						id,
+						file,
+						status,
+						kind,
+					}),
+				),
+				evidence,
+				coverage: snapshot.coverage,
+				requiredJsonSchema: {
+					schemaVersion: 1,
+					title: "string",
+					summary: "string",
+					groups: [
+						{
+							id: "string",
+							title: "string",
+							steps: [
+								{
+									id: "string",
+									title: "string",
+									explanation: "string",
+									evidenceIds: ["server-issued evidence id"],
+									observations: ["string"],
+									cautions: [
+										{
+											kind: "observed | inferred | unverified",
+											message: "string",
+											evidenceIds: ["server-issued evidence id"],
+										},
+									],
+								},
+							],
+						},
+					],
+					limitations: ["string"],
+				},
+			});
+			try {
+				await runtime.prompt({
+					sessionId: created.id,
+					prompt,
+					system: systemPrompt,
+					model: runtimeModel,
+					permission: { mode: "read-only" },
+				});
+				const runId = randomUUID();
+				const run: WalkthroughRun = {
+					projectId: project.id,
+					startedAt: Date.now(),
+					evidenceIds: snapshot.files.map((file) => file.id),
+					provider: { providerId, modelId: runtimeModelId },
+					status: "running",
+				};
+				walkthroughRuns.set(runId, run);
+				for (const [oldRunId, oldRun] of walkthroughRuns) {
+					if (
+						oldRun.status !== "running" &&
+						Date.now() - oldRun.startedAt > 60 * 60_000
+					)
+						walkthroughRuns.delete(oldRunId);
+				}
+				void (async () => {
+					try {
+						const status = await runtime.wait(created.id, {
+							timeoutMs: 15 * 60_000,
+							pollIntervalMs: 500,
+						});
+						if (status !== "completed")
+							throw new Error(
+								(await runtime.lastError?.(created.id)) ||
+									`Walkthrough generation ${status}`,
+							);
+						run.document = parseWalkthroughOutput(
+							(await runtime.readOutput?.(created.id)) ?? null,
+							run.evidenceIds,
+						);
+						run.status = "completed";
+					} catch (error) {
+						run.status = "failed";
+						run.error = (
+							error instanceof Error
+								? error.message
+								: "Unable to generate walkthrough"
+						)
+							.replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+							.slice(0, 600);
+						await runtime.abort(created.id).catch(() => undefined);
+					} finally {
+						await runtime.deleteSession?.(created.id).catch(() => undefined);
+					}
+				})();
+				return c.json({
+					snapshot,
+					document: null,
+					runId,
+					status: "running" as const,
+					provider: run.provider,
+				});
+			} catch (error) {
+				await runtime.abort(created.id).catch(() => undefined);
+				await runtime.deleteSession?.(created.id).catch(() => undefined);
+				throw error;
+			}
+		} catch (error) {
+			const message = (
+				error instanceof Error
+					? error.message
+					: "Unable to generate walkthrough"
+			)
+				.replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+				.slice(0, 600);
+			const status = message.startsWith("SNAPSHOT_UNSTABLE")
+				? 409
+				: message.startsWith("INPUT_TOO_LARGE")
+					? 413
+					: 502;
+			return c.json({ error: { message } }, status);
+		}
+	});
+	app.get("/api/projects/:id/walkthrough/runs/:runId", async (c) => {
+		const project = await repos.projects.getById(c.req.param("id"));
+		if (!project) return errorResponse(c, new Error("Project not found"));
+		const run = walkthroughRuns.get(c.req.param("runId"));
+		if (!run || run.projectId !== project.id)
+			return c.json({ error: { message: "Walkthrough run not found" } }, 404);
+		return c.json({
+			status: run.status,
+			document: run.document ?? null,
+			error: run.error,
+			provider: run.provider,
+		});
 	});
 	app.patch("/api/projects/:id", async (c) => {
 		try {
@@ -1719,8 +2139,8 @@ export async function createApp(options: DaemonAppOptions = {}) {
 	});
 	app.onError((error, c) => errorResponse(c, error));
 	if (
-		(options.initializeProviders ??
-			(import.meta.main || process.env.LOOM_DAEMON === "true"))
+		options.initializeProviders ??
+		(import.meta.main || process.env.LOOM_DAEMON === "true")
 	) {
 		void loadProviderModels().catch((error) =>
 			log(

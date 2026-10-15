@@ -48,6 +48,63 @@ export type ProjectPullRequests = {
 	}>;
 };
 
+export type WalkthroughLanguage = "en" | "id";
+export type WalkthroughEvidence = {
+	id: string;
+	file: string;
+	status: string;
+	kind: "diff" | "untracked";
+	patch: string;
+	truncated?: boolean;
+};
+export type WalkthroughSnapshot = {
+	scope: "uncommitted";
+	fingerprint: string;
+	capturedAt: string;
+	files: WalkthroughEvidence[];
+	coverage: {
+		truncated: boolean;
+		excludedFiles: number;
+		omittedFiles: number;
+		message?: string;
+	};
+};
+export type WalkthroughDocument = {
+	schemaVersion: 1;
+	title: string;
+	summary: string;
+	groups: Array<{
+		id: string;
+		title: string;
+		steps: Array<{
+			id: string;
+			title: string;
+			explanation: string;
+			evidenceIds: string[];
+			observations: string[];
+			cautions: Array<{
+				kind: "observed" | "inferred" | "unverified";
+				message: string;
+				evidenceIds: string[];
+			}>;
+		}>;
+	}>;
+	limitations: string[];
+};
+export type WalkthroughGeneration = {
+	snapshot: WalkthroughSnapshot;
+	document: WalkthroughDocument | null;
+	runId: string | null;
+	status: "running" | "completed";
+	provider: { providerId: string; modelId: string };
+};
+export type WalkthroughRunProgress = {
+	status: "running" | "completed" | "failed";
+	document: WalkthroughDocument | null;
+	error?: string;
+	provider: { providerId: string; modelId: string };
+};
+
 export type TaskStatus =
 	| "queued"
 	| "ready"
@@ -230,6 +287,25 @@ export const daemon = {
 		request<ProjectGitOverview>(`/api/projects/${id}/git`),
 	getProjectPullRequests: (id: string) =>
 		request<ProjectPullRequests>(`/api/projects/${id}/pull-requests`),
+	getProjectWalkthroughSnapshot: (id: string) =>
+		request<{ snapshot: WalkthroughSnapshot }>(
+			`/api/projects/${id}/walkthrough/snapshot`,
+		),
+	generateProjectWalkthrough: (
+		id: string,
+		input: {
+			language: WalkthroughLanguage;
+			model: { providerId: string; modelId: string };
+		},
+	) =>
+		request<WalkthroughGeneration>(`/api/projects/${id}/walkthrough`, {
+			method: "POST",
+			body: JSON.stringify(input),
+		}),
+	getProjectWalkthroughRun: (id: string, runId: string) =>
+		request<WalkthroughRunProgress>(
+			`/api/projects/${id}/walkthrough/runs/${encodeURIComponent(runId)}`,
+		),
 	updateProject: (
 		id: string,
 		input: { name?: string; path?: string; autoAccept?: boolean },
@@ -307,9 +383,12 @@ export const daemon = {
 			status: string;
 		}>(`/api/providers/${id}/refresh`, { method: "POST" }),
 	refreshProviderModels: (id: string) =>
-		request<unknown[]>(`/api/providers/${encodeURIComponent(id)}/models/refresh`, {
-			method: "POST",
-		}),
+		request<unknown[]>(
+			`/api/providers/${encodeURIComponent(id)}/models/refresh`,
+			{
+				method: "POST",
+			},
+		),
 	listModels: () =>
 		request<
 			Array<{

@@ -55,6 +55,8 @@ export type AgentRuntime = {
 	prompt(input: {
 		sessionId: string;
 		prompt: string;
+		/** Provider-level instructions separated from the user task when supported. */
+		system?: string;
 		model?: RuntimeModel;
 		/** Base64 images (pasted photos, mockups) sent alongside the text. */
 		images?: Array<{ mime: string; data: string }>;
@@ -75,5 +77,6 @@ export type AgentRuntime = {
 		Exclude<AgentRunStatus, "queued" | "running" | "waiting_permission">
 	>;
 	abort(sessionId: string): Promise<void>;
+	deleteSession?(sessionId: string): Promise<void>;
 	getDiff(sessionId: string): Promise<unknown>;
 };

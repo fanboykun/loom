@@ -183,6 +183,7 @@ class CliRuntime implements AgentRuntime {
 	async prompt(input: {
 		sessionId: string;
 		prompt: string;
+		system?: string;
 		model?: { providerID: string; modelID: string };
 		permission?: RuntimePermission;
 	}): Promise<void> {
@@ -191,7 +192,9 @@ class CliRuntime implements AgentRuntime {
 			throw new ProviderError("PROCESS_FAILED", "Session is already running");
 		if (input.permission) session.permission = input.permission;
 		const command = await this.options.buildPrompt({
-			prompt: input.prompt,
+			prompt: input.system
+				? `${input.system.trim()}\n\n---\n\n${input.prompt}`
+				: input.prompt,
 			model: input.model?.modelID,
 			permission: input.permission ?? session.permission,
 		});
