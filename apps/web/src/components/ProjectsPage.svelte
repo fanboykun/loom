@@ -4,9 +4,12 @@ import {
 	CircleHelp,
 	Columns3,
 	FileCode,
+	FileDiff as FileDiffIcon,
 	Folder,
 	FolderPlus,
 	GitBranch,
+	GitPullRequest,
+	Gauge,
 	LoaderCircle,
 	MessageSquare,
 	MessageSquarePlus,
@@ -41,7 +44,13 @@ import { Input } from "$lib/components/ui/input";
 import * as Marker from "$lib/components/ui/marker";
 import * as Select from "$lib/components/ui/select";
 import * as Tabs from "$lib/components/ui/tabs";
-import { daemon, type Project, type Task } from "$lib/daemon";
+import {
+	daemon,
+	type Project,
+	type ProjectGitOverview,
+	type ProjectPullRequests,
+	type Task,
+} from "$lib/daemon";
 import AddProjectForm from "./AddProjectForm.svelte";
 import Composer from "./chat/Composer.svelte";
 import QuestionCard from "./chat/QuestionCard.svelte";
@@ -108,6 +117,13 @@ let fileError = $state("");
 let fileName = $state("");
 let fileContent = $state("");
 let diffs = $state<FileDiff[]>([]);
+type ChatPanel = "context" | "git" | "pull-requests" | "changes";
+let activePanel = $state<ChatPanel | null>(null);
+let gitOverview = $state<ProjectGitOverview | null>(null);
+let pullRequestData = $state<ProjectPullRequests | null>(null);
+let panelLoading = $state(false);
+let panelError = $state("");
+let panelRequest = 0;
 let fileTab = $state("changes");
 let scroller = $state<HTMLDivElement>();
 let follow = true;
@@ -140,6 +156,58 @@ const turns = $derived.by(() => {
 	}
 	return groups;
 });
+const assistantMessages = $derived(
+	(conversation?.messages ?? []).filter((message) => message.info.role === "assistant"),
+);
+const latestUsageMessage = $derived(
+	assistantMessages.findLast((message) => message.info.tokens),
+);
+const hasProviderUsage = $derived(
+	assistantMessages.some((message) => message.info.tokens !== undefined),
+);
+const hasProviderCost = $derived(
+	assistantMessages.some((message) => typeof message.info.cost === "number"),
+);
+const sessionUsage = $derived.by(() => {
+	const total = {
+		input: 0,
+		output: 0,
+		reasoning: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		cost: 0,
+	};
+	for (const message of assistantMessages) {
+		const usage = message.info.tokens;
+		if (usage) {
+			total.input += usage.input ?? 0;
+			total.output += usage.output ?? 0;
+			total.reasoning += usage.reasoning ?? 0;
+			total.cacheRead += usage.cache?.read ?? 0;
+			total.cacheWrite += usage.cache?.write ?? 0;
+		}
+		total.cost += message.info.cost ?? 0;
+	}
+	return total;
+});
+const contextModel = $derived(
+	latestUsageMessage
+		? catalog.models.find(
+				(item) =>
+					item.providerID === latestUsageMessage.info.providerID &&
+					item.modelID === latestUsageMessage.info.modelID,
+				)
+		: undefined,
+);
+const contextTokens = $derived(
+	(latestUsageMessage?.info.tokens?.input ?? 0) +
+		(latestUsageMessage?.info.tokens?.cache?.read ?? 0),
+);
+const contextPercent = $derived(
+	contextModel?.contextWindow
+		? Math.min(100, (contextTokens / contextModel.contextWindow) * 100)
+		: null,
+);
 const selectedCustomAgent = $derived(
 	customAgents.find((item) => item.id === customAgentId),
 );
@@ -274,9 +342,12 @@ async function refreshSession(id: string) {
 	return result;
 }
 async function selectSession(id: string) {
+	panelRequest += 1;
 	sessionId = id;
 	conversation = null;
 	optimistic = null;
+	diffs = [];
+	panelLoading = false;
 	error = "";
 	sessionLoading = !!id;
 	follow = true;
@@ -467,8 +538,59 @@ async function newSession(projectId = selectedProjectId) {
 	selectedProjectId = projectId;
 	draft = "";
 	model = preferredModel(projectId);
+	sessionId = "";
+	conversation = null;
+	optimistic = null;
+	diffs = [];
+	sessionLoading = false;
 	await goto(homeUrl());
-	if (sessionId) await selectSession("");
+}
+async function showPanel(panel: ChatPanel, force = false) {
+	if (activePanel === panel && !force) {
+		activePanel = null;
+		panelRequest += 1;
+		panelLoading = false;
+		return;
+	}
+	activePanel = panel;
+	panelError = "";
+	const request = ++panelRequest;
+	const projectId = selectedProjectId;
+	const currentSession = sessionId;
+	panelLoading = false;
+	if (panel === "context") return;
+	if ((panel === "git" || panel === "pull-requests") && !projectId) {
+		panelError = "Choose a project to inspect repository details.";
+		return;
+	}
+	panelLoading = true;
+	try {
+		if (panel === "git") {
+			gitOverview = null;
+			const result = await daemon.getProjectGit(projectId);
+			if (request === panelRequest && projectId === selectedProjectId)
+				gitOverview = result;
+		} else if (panel === "pull-requests") {
+			pullRequestData = null;
+			const result = await daemon.getProjectPullRequests(projectId);
+			if (request === panelRequest && projectId === selectedProjectId)
+				pullRequestData = result;
+		} else {
+			diffs = [];
+			const result = currentSession ? await chat.diff(currentSession) : [];
+			if (
+				request === panelRequest &&
+				currentSession === sessionId &&
+				projectId === selectedProjectId
+			)
+				diffs = result;
+		}
+	} catch (reason) {
+		if (request === panelRequest)
+			panelError = reason instanceof Error ? reason.message : "Unable to load panel data";
+	} finally {
+		if (request === panelRequest) panelLoading = false;
+	}
 }
 async function send(input: Parameters<typeof chat.send>[1]) {
 	if (!selectedProjectId || sending) return false;
@@ -719,6 +841,8 @@ async function answer(requestId: string, answers: string[][]) {
       </div>
     {:else}
     {#if noModels}<div role="alert" class="flex shrink-0 flex-wrap items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-5 py-3 text-sm text-amber-200"><TriangleAlert size={16} class="shrink-0 text-amber-300" /><p class="min-w-0 flex-1">Connected, but no models are configured in OpenCode. Add a provider (for example, run <code class="rounded bg-black/30 px-1 py-0.5 text-xs">opencode auth login</code>), then restart the daemon.</p><Button variant="outline" size="sm" onclick={reloadModels}><RefreshCw size={13} />Reload models</Button></div>{/if}
+    <div class="flex min-h-0 flex-1">
+    <div class="flex min-w-0 flex-1 flex-col">
     <div bind:this={scroller} onscroll={(event) => { const node = event.currentTarget; follow = node.scrollHeight - node.scrollTop - node.clientHeight < 100; }} class="nice-scroll min-h-0 flex-1 overflow-y-auto">
       <div class={`mx-auto flex min-h-full w-full max-w-[740px] flex-col px-5 ${sessionId ? "py-8" : "justify-center py-12"}`}>
         {#if loading || sessionLoading}<div role="status" class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"><LoaderCircle size={17} class="animate-spin" />Loading {loading ? "workspace" : "conversation"}…</div>
@@ -739,6 +863,76 @@ async function answer(requestId: string, answers: string[][]) {
       </div>
     </div>
     {#if sessionId && viewMode === "chat"}<div class="shrink-0 border-t bg-background px-5 py-4"><div class="mx-auto max-w-3xl"><Composer projectId={selectedProjectId} {catalog} {customAgents} {busy} disabled={!conversation || sessionLoading} onsend={send} onstop={stop} bind:draft bind:model bind:agent bind:customAgentId autoAccept={selectedProject?.autoAccept ?? false} onAutoAcceptChange={selectedProject ? (value) => void setAutoAccept(value) : undefined} /></div></div>{/if}
+    </div>
+    {#if activePanel}
+      <aside class="flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]" aria-label={`${activePanel} panel`}>
+        <div class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+          <p class="min-w-0 flex-1 truncate text-sm font-medium">{activePanel === "context" ? "Context usage" : activePanel === "git" ? "Git" : activePanel === "pull-requests" ? "Pull requests" : "Changes"}</p>
+          {#if activePanel !== "context"}<Button variant="ghost" size="icon" class="size-7" aria-label="Refresh panel" title="Refresh" onclick={() => void showPanel(activePanel!, true)} disabled={panelLoading}><RefreshCw size={13} class={panelLoading ? "animate-spin" : ""} /></Button>{/if}
+        </div>
+        <div class="nice-scroll min-h-0 flex-1 overflow-y-auto p-4">
+          {#if panelError}<p role="alert" class="mb-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{panelError}</p>{/if}
+          {#if activePanel === "context"}
+            <div class="flex flex-col gap-3">
+              <section class="rounded-xl border bg-card/70 p-4">
+                <p class="text-xs text-muted-foreground">Latest provider context</p>
+                <p class="mt-2 text-2xl font-semibold tabular-nums">{!sessionId || latestUsageMessage ? contextTokens.toLocaleString() : "—"} <span class="text-sm font-normal text-muted-foreground">tokens</span></p>
+                {#if contextPercent !== null}
+                  <div class="mt-3 h-2 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-primary transition-[width]" style={`width: ${contextPercent}%`}></div></div>
+                  <p class="mt-2 text-[11px] text-muted-foreground">{contextPercent.toFixed(1)}% of {contextModel?.contextWindow?.toLocaleString()} token window</p>
+                {:else if latestUsageMessage}
+                  <p class="mt-2 text-[11px] text-muted-foreground">Provider reported usage; context window size is unavailable.</p>
+                {:else}
+                  <p class="mt-2 text-[11px] leading-5 text-muted-foreground">{sessionId ? "No token usage has been reported by the provider for this conversation yet." : "A new session starts at 0 tokens. Usage appears after the provider returns it."}</p>
+                {/if}
+                {#if latestUsageMessage}<p class="mt-2 truncate text-[11px] text-muted-foreground">{latestUsageMessage.info.providerID}/{latestUsageMessage.info.modelID}</p>{/if}
+              </section>
+              <div class="grid grid-cols-2 gap-2">
+                <div class="rounded-lg border bg-card/50 p-3"><p class="text-[11px] text-muted-foreground">Messages</p><p class="mt-1 text-lg font-medium tabular-nums">{conversation?.messages.length ?? 0}</p></div>
+                <div class="rounded-lg border bg-card/50 p-3"><p class="text-[11px] text-muted-foreground">Cost</p><p class="mt-1 text-lg font-medium tabular-nums">{hasProviderCost ? `$${sessionUsage.cost.toFixed(4)}` : "—"}</p></div>
+              </div>
+              <section class="rounded-lg border bg-card/50 p-3">
+                <p class="text-xs font-medium">Session token usage</p>
+                {#if hasProviderUsage}<dl class="mt-3 flex flex-col gap-2 text-xs">
+                  <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Input</dt><dd class="tabular-nums">{sessionUsage.input.toLocaleString()}</dd></div>
+                  <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Output</dt><dd class="tabular-nums">{sessionUsage.output.toLocaleString()}</dd></div>
+                  <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Reasoning</dt><dd class="tabular-nums">{sessionUsage.reasoning.toLocaleString()}</dd></div>
+                  <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Cache read / write</dt><dd class="tabular-nums">{sessionUsage.cacheRead.toLocaleString()} / {sessionUsage.cacheWrite.toLocaleString()}</dd></div>
+                </dl>
+                {:else if !sessionId}<p class="mt-3 text-[11px] leading-5 text-muted-foreground">Usage totals start at 0 and fill in when the provider returns token metadata.</p>
+                {:else}<p class="mt-3 text-[11px] leading-5 text-muted-foreground">Provider usage details are unavailable until a response includes token metadata.</p>{/if}
+              </section>
+            </div>
+          {:else if activePanel === "git"}
+            {#if panelLoading && !gitOverview}<div class="flex items-center gap-2 py-8 text-xs text-muted-foreground"><LoaderCircle size={14} class="animate-spin" />Reading repository…</div>
+            {:else if gitOverview}<div class="flex flex-col gap-3">
+              <section class="rounded-lg border bg-card/50 p-3"><p class="text-[11px] text-muted-foreground">Current branch</p><p class="mt-1 flex items-center gap-2 break-all text-sm font-medium"><GitBranch size={14} class="shrink-0 text-orange-300" />{gitOverview.branch}</p><p class="mt-2 text-[11px] text-muted-foreground">Default: {gitOverview.defaultBranch}</p></section>
+              {#if gitOverview.remoteUrl}<section class="rounded-lg border bg-card/50 p-3"><p class="text-[11px] text-muted-foreground">Origin</p>{#if gitOverview.remoteUrl.startsWith("https://") || gitOverview.remoteUrl.startsWith("http://")}<a href={gitOverview.remoteUrl} target="_blank" rel="noreferrer" class="mt-1 block truncate text-xs text-primary underline-offset-4 hover:underline">{gitOverview.remoteUrl}</a>{:else}<p class="mt-1 truncate font-mono text-xs text-muted-foreground">{gitOverview.remoteUrl}</p>{/if}</section>{/if}
+              <section class="rounded-lg border bg-card/50 p-3"><p class="text-xs font-medium">Working tree</p><p class="mt-1 text-xs text-muted-foreground">{gitOverview.files.length ? `${gitOverview.files.length}${gitOverview.truncated ? "+" : ""} changed files` : "Clean"}</p></section>
+              {#if gitOverview.diffStat}<pre class="overflow-auto rounded-lg border bg-background p-3 text-[11px] leading-5 text-muted-foreground">{gitOverview.diffStat}</pre>{/if}
+            </div>
+            {:else if !panelLoading}<p class="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">Repository details are unavailable.</p>{/if}
+          {:else if activePanel === "pull-requests"}
+            {#if panelLoading && !pullRequestData}<div class="flex items-center gap-2 py-8 text-xs text-muted-foreground"><LoaderCircle size={14} class="animate-spin" />Loading pull requests…</div>{:else if pullRequestData?.available && pullRequestData.pullRequests.length}<div class="flex flex-col gap-2">{#each pullRequestData.pullRequests as pr (pr.number)}<a href={pr.url} target="_blank" rel="noreferrer" class="block rounded-lg border bg-card/50 p-3 transition hover:border-primary/40 hover:bg-accent/30"><div class="flex items-center gap-2"><Badge variant="outline" class="shrink-0">#{pr.number}</Badge><span class="truncate text-[11px] text-muted-foreground">{pr.state}</span></div><p class="mt-2 text-sm font-medium leading-5">{pr.title}</p><p class="mt-1 truncate font-mono text-[10px] text-muted-foreground">{pr.headRefName}</p></a>{/each}</div>{:else if pullRequestData?.available}<p class="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No open pull requests found for this repository.</p>{:else if pullRequestData?.message}<section class="flex flex-col gap-3 rounded-lg border border-dashed p-4"><GitPullRequest size={17} class="text-muted-foreground" /><p class="text-xs leading-5 text-muted-foreground">{pullRequestData.message}</p><p class="text-[11px] leading-5 text-muted-foreground">Install and authenticate GitHub CLI with <code class="rounded bg-muted px-1 py-0.5">gh auth login</code> to load pull requests.</p></section>{/if}
+          {:else}
+            <section>
+              <div class="mb-3 flex items-center justify-between"><p class="text-xs font-medium">Session changes</p><Badge variant="outline">{diffs.length}</Badge></div>
+              {#if panelLoading && !diffs.length}<div class="flex items-center gap-2 py-8 text-xs text-muted-foreground"><LoaderCircle size={14} class="animate-spin" />Loading changes…</div>
+              {:else if !sessionId}<p class="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">Start a chat to see its file changes.</p>
+              {:else if !diffs.length}<p class="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No file changes in this session yet.</p>
+              {:else}<div class="flex flex-col gap-1">{#each diffs as diff (diff.file)}<Button variant="ghost" class="h-auto min-w-0 justify-start gap-2 px-2 py-2" onclick={() => void showFiles(diff.file)}><FileCode size={14} /><span class="min-w-0 flex-1 truncate text-left font-mono text-[11px]" title={diff.file}>{diff.file}</span><span class="shrink-0 text-[10px] text-emerald-400">+{diff.additions}</span><span class="shrink-0 text-[10px] text-red-400">−{diff.deletions}</span></Button>{/each}</div>{/if}
+            </section>
+          {/if}
+        </div>
+      </aside>
+    {/if}
+    <nav class="flex w-11 shrink-0 flex-col items-center gap-1 border-l bg-card/20 py-2" aria-label="Chat tools">
+      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "context" ? "text-primary" : "text-muted-foreground"}`} aria-label="Context usage" title="Context usage" aria-pressed={activePanel === "context"} onclick={() => void showPanel("context")}><Gauge size={16} /></Button>
+      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "git" ? "text-primary" : "text-muted-foreground"}`} aria-label="Git status" title="Git status" aria-pressed={activePanel === "git"} onclick={() => void showPanel("git")}><GitBranch size={16} /></Button>
+      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "pull-requests" ? "text-primary" : "text-muted-foreground"}`} aria-label="Pull requests" title="Pull requests" aria-pressed={activePanel === "pull-requests"} onclick={() => void showPanel("pull-requests")}><GitPullRequest size={16} /></Button>
+      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "changes" ? "text-primary" : "text-muted-foreground"}`} aria-label="Changed files" title="Changed files" aria-pressed={activePanel === "changes"} onclick={() => void showPanel("changes")}><FileDiffIcon size={16} /></Button>
+    </nav>
+    </div>
     {/if}
   </main>
 </div>

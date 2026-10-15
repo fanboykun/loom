@@ -50,6 +50,14 @@ type ProviderMessage = {
 		role: string;
 		providerID?: string;
 		modelID?: string;
+		cost?: number;
+		tokens?: {
+			total?: number;
+			input?: number;
+			output?: number;
+			reasoning?: number;
+			cache?: { read?: number; write?: number };
+		};
 		error?: { name: string; data: { message: string } };
 		time: { created: number; completed?: number };
 	};
@@ -345,7 +353,10 @@ export function createChatRoutes(options: {
 				providers: Array<{
 					id: string;
 					name: string;
-					models: Record<string, { id: string; name: string }>;
+					models: Record<
+						string,
+						{ id: string; name: string; limit?: { context?: number } }
+					>;
 				}>;
 				default: Record<string, string>;
 			}>("/config/providers", root),
@@ -368,6 +379,7 @@ export function createChatRoutes(options: {
 				providerId: model.providerId,
 				connectionId: model.connectionId,
 				capabilities: model.capabilities,
+				contextWindow: model.contextWindow,
 			})) ?? [];
 		const managedProviderIds = new Set(
 			normalizedModels.map((model) => model.providerID),
@@ -382,6 +394,7 @@ export function createChatRoutes(options: {
 								modelID: modelId,
 								name: model.name || modelId,
 								provider: provider.name,
+								contextWindow: model.limit?.context,
 							})),
 				),
 				...normalizedModels,

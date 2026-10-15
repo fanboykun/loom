@@ -27,6 +27,27 @@ export type Project = {
 	createdAt: string;
 };
 
+export type ProjectGitOverview = {
+	branch: string;
+	defaultBranch: string;
+	remoteUrl: string | null;
+	files: Array<{ status: string; path: string }>;
+	truncated: boolean;
+	diffStat: string;
+};
+
+export type ProjectPullRequests = {
+	available: boolean;
+	message: string | null;
+	pullRequests: Array<{
+		number: number;
+		title: string;
+		url: string;
+		state: string;
+		headRefName: string;
+	}>;
+};
+
 export type TaskStatus =
 	| "queued"
 	| "ready"
@@ -205,6 +226,10 @@ export async function request<T>(path: string, init: RequestInit = {}) {
 export const daemon = {
 	listProjects: () => request<Project[]>("/api/projects"),
 	getProject: (id: string) => request<Project>(`/api/projects/${id}`),
+	getProjectGit: (id: string) =>
+		request<ProjectGitOverview>(`/api/projects/${id}/git`),
+	getProjectPullRequests: (id: string) =>
+		request<ProjectPullRequests>(`/api/projects/${id}/pull-requests`),
 	updateProject: (
 		id: string,
 		input: { name?: string; path?: string; autoAccept?: boolean },

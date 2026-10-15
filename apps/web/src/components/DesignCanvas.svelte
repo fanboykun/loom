@@ -104,7 +104,6 @@ const workingNode = $derived(
 			(node.status === "queued" || node.status === "generating"),
 	) ?? null,
 );
-
 function modelRef() {
 	if (unavailableModel) return undefined;
 	if (selectedModel?.openCodeProviderID && selectedModel.openCodeModelID)
@@ -768,7 +767,7 @@ function wheel(event: WheelEvent) {
 		</div>
 	</div>
 
-	<!-- Chat rail -->
+	<!-- Design agent chat -->
 	<aside class="flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[380px]" aria-label="Design chat">
 		<div class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
 			<p class="min-w-0 flex-1 truncate text-sm font-medium">Design agent</p>

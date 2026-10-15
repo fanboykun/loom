@@ -33,6 +33,14 @@ export type ChatMessage = {
 		providerID?: string;
 		agent?: string;
 		error?: { name: string; data?: { message?: string } };
+		cost?: number;
+		tokens?: {
+			total?: number;
+			input?: number;
+			output?: number;
+			reasoning?: number;
+			cache?: { read?: number; write?: number };
+		};
 		time: { created: number; completed?: number };
 	};
 	parts: ChatPart[];
@@ -75,6 +83,7 @@ export type Model = {
 	providerId?: string;
 	connectionId?: string;
 	capabilities?: string[];
+	contextWindow?: number;
 	designSupported?: boolean;
 	openCodeProviderID?: string;
 	openCodeModelID?: string;

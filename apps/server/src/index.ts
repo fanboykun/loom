@@ -106,6 +106,30 @@ async function jsonBody(c: { req: { json: () => Promise<unknown> } }) {
 	}
 }
 
+async function runWorkspaceCommand(
+	command: string,
+	args: string[],
+	cwd: string,
+	timeoutMs = 5_000,
+) {
+	const child = Bun.spawn([command, ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const timeout = setTimeout(() => child.kill(), timeoutMs);
+	try {
+		const [exitCode, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		return { exitCode, stdout: stdout.slice(0, 500_000), stderr: stderr.slice(0, 20_000) };
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
 function recordToProject(
 	record:
 		| {
@@ -920,6 +944,66 @@ export async function createApp(options: DaemonAppOptions = {}) {
 			return c.json(recordToProject(project));
 		} catch (error) {
 			return errorResponse(c, error);
+		}
+	});
+	app.get("/api/projects/:id/git", async (c) => {
+		const project = await repos.projects.getById(c.req.param("id"));
+		if (!project) return errorResponse(c, new Error("Project not found"));
+		try {
+			const repository = await projectValidation.validate(project.path);
+			const [status, diff, stagedDiff, remote] = await Promise.all([
+				runWorkspaceCommand("git", ["status", "--short", "--branch", "--untracked-files=all"], repository.path),
+				runWorkspaceCommand("git", ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--stat"], repository.path),
+				runWorkspaceCommand("git", ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--cached", "--stat"], repository.path),
+				runWorkspaceCommand("git", ["remote", "get-url", "origin"], repository.path),
+			]);
+			if (status.exitCode !== 0)
+				throw new Error(status.stderr.trim() || "Unable to read Git status");
+			const lines = status.stdout.trimEnd().split("\n");
+			const files = lines.slice(1).filter(Boolean).map((line) => ({
+				status: line.slice(0, 2).trim() || "?",
+				path: line.slice(3).split(" -> ").at(-1) ?? line.slice(3),
+			}));
+			return c.json({
+				branch: lines[0]?.replace(/^##\s*/, "") || "Unknown branch",
+				defaultBranch: project.defaultBranch,
+				remoteUrl:
+					remote.exitCode === 0
+						? remote.stdout.trim().replace(/(https?:\/\/)[^/@\s]+@/i, "$1")
+						: null,
+				files: files.slice(0, 300),
+				truncated: files.length > 300,
+				diffStat: [diff.stdout.trim(), stagedDiff.stdout.trim()].filter(Boolean).join("\n"),
+			});
+		} catch (error) {
+			return errorResponse(c, error);
+		}
+	});
+	app.get("/api/projects/:id/pull-requests", async (c) => {
+		const project = await repos.projects.getById(c.req.param("id"));
+		if (!project) return errorResponse(c, new Error("Project not found"));
+		try {
+			const repository = await projectValidation.validate(project.path);
+			const remote = await runWorkspaceCommand(
+				"git",
+				["remote", "get-url", "origin"],
+				repository.path,
+			);
+			const origin = remote.exitCode === 0 ? remote.stdout.trim() : "";
+			if (!/^(?:https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)/i.test(origin))
+				return c.json({ available: false, message: "Pull request listing is enabled for repositories hosted on github.com with an origin remote.", pullRequests: [] });
+			const result = await runWorkspaceCommand(
+				"gh",
+				["pr", "list", "--json", "number,title,url,state,headRefName", "--limit", "20"],
+				repository.path,
+				8_000,
+			);
+			if (result.exitCode !== 0)
+				return c.json({ available: false, message: result.stderr.trim() || "GitHub CLI could not load pull requests.", pullRequests: [] });
+			return c.json({ available: true, message: null, pullRequests: JSON.parse(result.stdout) });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "GitHub CLI is unavailable";
+			return c.json({ available: false, message, pullRequests: [] });
 		}
 	});
 	app.patch("/api/projects/:id", async (c) => {
