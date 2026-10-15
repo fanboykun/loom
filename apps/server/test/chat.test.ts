@@ -102,6 +102,33 @@ describe("chat gateway", () => {
 			},
 		]);
 	});
+	test("builds the composer catalog without rescanning providers", async () => {
+		const app = createChatRoutes({
+			projects: {
+				list: async () => [],
+				getById: async (id: string) =>
+					id === "project" ? { path: "/tmp" } : null,
+			},
+			request: async <T>(path: string) => {
+				if (path === "/config/providers")
+					return { providers: [], default: {} } as T;
+				return [] as T;
+			},
+			providerManager: {
+				refreshAll: async () => {
+					throw new Error("catalog request must not rescan providers");
+				},
+				catalog: { listAvailable: () => [] },
+			} as never,
+		});
+		const response = await app.request("/catalog?projectId=project");
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			models: [],
+			agents: [],
+			commands: [],
+		});
+	});
 
 	test("reads recorded edit patches when session snapshots are disabled", async () => {
 		const { app } = setup();

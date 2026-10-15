@@ -66,7 +66,7 @@ import {
 	createDefaultProviderRegistry,
 	ProviderManager,
 } from "@loom/providers";
-import type { AgentRuntime } from "@loom/providers/core";
+import type { AgentModel, AgentRuntime } from "@loom/providers/core";
 import {
 	MergeConflictError,
 	WorktreeError,
@@ -292,6 +292,7 @@ export type DaemonAppOptions = {
 	agyPermissionStore?: AgyPermissionStore;
 	agyPermissionUrl?: string;
 	registerAgyHook?: boolean;
+	initializeProviders?: boolean;
 };
 
 export async function createApp(options: DaemonAppOptions = {}) {
@@ -315,41 +316,120 @@ export async function createApp(options: DaemonAppOptions = {}) {
 	const openCodeManager =
 		options.openCodeManager ?? new OpenCodeServerManager();
 	const openCodeRuntime = new OpenCodeHttpRuntime();
+	const providerModelCachePath = join(
+		dataDirectory(),
+		"cache",
+		"provider-models.json",
+	);
+	let persistProviderModelCache = () => {};
 	const providerManager = new ProviderManager({
 		registry: createDefaultProviderRegistry(openCodeManager, openCodeRuntime),
 		onEvent: (event) => {
-			log("provider", event.type, event);
-			if (event.type === "provider.modelsUpdated")
+			// Model catalogs can contain hundreds of entries. Logging the complete
+			// payload on every refresh blocks startup on stdout and produces huge logs.
+			if (event.type === "provider.modelsUpdated") {
+				log("provider", event.type, {
+					providerId: event.providerId,
+					modelCount: event.models.length,
+				});
+				persistProviderModelCache();
 				eventPublisher.publish({
 					type: event.type,
 					providerId: event.providerId,
 					models: event.models,
 				});
-			else if (
+			} else if (
 				event.type === "provider.detected" ||
 				event.type === "provider.connected"
-			)
+			) {
+				log("provider", event.type, event);
 				eventPublisher.publish({
 					type: event.type,
 					providerId: event.providerId,
 					connection: event.connection,
 				});
-			else if (
+			} else if (
 				event.type === "provider.disconnected" ||
 				event.type === "provider.authRequired"
-			)
+			) {
+				log("provider", event.type, event);
 				eventPublisher.publish({
 					type: event.type,
 					providerId: event.providerId,
 				});
-			else
+			} else {
+				log("provider", event.type, event);
 				eventPublisher.publish({
 					type: event.type,
 					providerId: event.providerId,
 					message: event.message,
 				});
+			}
 		},
 	});
+	// Reuse the last known catalog while CLI/provider discovery runs in the
+	// background. The connection check will refresh availability shortly after.
+	try {
+		const cached = JSON.parse(await readFile(providerModelCachePath, "utf8"));
+		const cachedModels = z
+			.array(
+				z.object({
+					id: z.string(),
+					providerId: z.string(),
+					connectionId: z.string(),
+					name: z.string(),
+					displayName: z.string(),
+					capabilities: z.array(z.string()),
+					isAvailable: z.boolean(),
+					metadata: z.record(z.string(), z.unknown()).optional(),
+				}).passthrough(),
+			)
+			.safeParse(cached);
+		if (cachedModels.success)
+			providerManager.catalog.set(cachedModels.data as AgentModel[]);
+	} catch {}
+	let providerModelCacheWrite = Promise.resolve();
+	persistProviderModelCache = () => {
+		const snapshot = JSON.stringify(providerManager.catalog.all());
+		providerModelCacheWrite = providerModelCacheWrite
+			.catch(() => {})
+			.then(async () => {
+				await mkdir(dirname(providerModelCachePath), { recursive: true });
+				await writeFile(providerModelCachePath, `${snapshot}\n`, "utf8");
+			});
+		void providerModelCacheWrite.catch((error) =>
+			log(
+				"provider",
+				"model-cache-write-failed",
+				{ error: error instanceof Error ? error.message : String(error) },
+				"warn",
+			),
+		);
+	};
+	let providerDiscovery: ReturnType<typeof providerManager.refreshAll> | undefined;
+	let providerModelBootstrap: Promise<void> | undefined;
+	const discoverProviders = () =>
+		(providerDiscovery ??= providerManager.refreshAll());
+	const refreshConnectedProviderModels = async (
+		connections: Awaited<ReturnType<typeof providerManager.refreshAll>>,
+	) => {
+		for (const connection of connections) {
+			if (connection.status !== "connected")
+				providerManager.catalog.replaceConnection(connection.id, []);
+		}
+		await Promise.allSettled(
+			connections
+				.filter((connection) => connection.status === "connected")
+				.map((connection) =>
+					providerManager.refreshModels(connection.providerId),
+				),
+		);
+		persistProviderModelCache();
+	};
+	const loadProviderModels = () =>
+		(providerModelBootstrap ??= discoverProviders().then(
+			refreshConnectedProviderModels,
+		));
 	const ownsOpenCode = options.startOpenCode ?? true;
 	if (ownsOpenCode) {
 		// Start OpenCode in the background so the daemon can bind its API
@@ -907,9 +987,13 @@ export async function createApp(options: DaemonAppOptions = {}) {
 				executablePath: connection?.executablePath ?? null,
 			};
 		});
-	app.get("/api/providers", async (c) => c.json(serializeProviders()));
+	app.get("/api/providers", async (c) => {
+		await discoverProviders();
+		return c.json(serializeProviders());
+	});
 	app.post("/api/providers/refresh-all", async (c) => {
-		await providerManager.refreshAll({ refreshModels: true });
+		const connections = await providerManager.refreshAll();
+		void refreshConnectedProviderModels(connections);
 		return c.json(serializeProviders());
 	});
 	app.get("/api/providers/:id", async (c) => {
@@ -956,9 +1040,19 @@ export async function createApp(options: DaemonAppOptions = {}) {
 	app.post("/api/providers/:id/models/refresh", async (c) =>
 		c.json(await providerManager.refreshModels(c.req.param("id"))),
 	);
-	app.get("/api/models", (c) =>
-		c.json(providerManager.catalog.listAvailable()),
-	);
+	app.get("/api/models", (c) => {
+		// Never hold a UI request open while CLIs enumerate their models. The
+		// startup refresh updates this catalog and publishes provider.modelsUpdated.
+		void loadProviderModels().catch((error) =>
+			log(
+				"provider",
+				"model-refresh-failed",
+				{ error: error instanceof Error ? error.message : String(error) },
+				"warn",
+			),
+		);
+		return c.json(providerManager.catalog.listAvailable());
+	});
 	app.get("/api/runtime", (c) =>
 		c.json({
 			id: "opencode",
@@ -1540,6 +1634,19 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		return errorResponse(c, new Error("Route not found"));
 	});
 	app.onError((error, c) => errorResponse(c, error));
+	if (
+		(options.initializeProviders ??
+			(import.meta.main || process.env.LOOM_DAEMON === "true"))
+	) {
+		void loadProviderModels().catch((error) =>
+			log(
+				"provider",
+				"startup-check-failed",
+				{ error: error instanceof Error ? error.message : String(error) },
+				"warn",
+			),
+		);
+	}
 	return {
 		app,
 		config,

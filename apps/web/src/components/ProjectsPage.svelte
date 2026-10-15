@@ -8,6 +8,7 @@ import {
 	FolderPlus,
 	GitBranch,
 	LoaderCircle,
+	MessageSquare,
 	MessageSquarePlus,
 	PanelLeft,
 	Pencil,
@@ -139,9 +140,13 @@ const turns = $derived.by(() => {
 	}
 	return groups;
 });
+const selectedCustomAgent = $derived(
+	customAgents.find((item) => item.id === customAgentId),
+);
 const activeProvider = $derived(
-	catalog.models.find((item) => `${item.providerID}/${item.modelID}` === model)
-		?.providerID ??
+	selectedCustomAgent?.provider ??
+		catalog.models.find((item) => `${item.providerID}/${item.modelID}` === model)
+			?.providerID ??
 		(model.split("/")[0] || "opencode"),
 );
 $effect(() => {
@@ -153,8 +158,16 @@ $effect(() => {
 	const providerModels = models.filter(
 		(item) => item.providerID === providerID,
 	);
+	if (!providerModels.length) {
+		const openCodeModel = models.find(
+			(item) =>
+				item.providerID === "opencode" &&
+				item.modelID === `${providerID}/${selectedId}`,
+		);
+		if (openCodeModel) model = `opencode/${openCodeModel.modelID}`;
+		return;
+	}
 	if (
-		!providerModels.length ||
 		providerModels.some((item) => item.modelID === selectedId)
 	)
 		return;
@@ -287,8 +300,16 @@ async function selectSession(id: string) {
 		const recent = updated?.messages.findLast(
 			(message) => message.info.role === "assistant",
 		)?.info;
-		if (recent?.providerID && recent.modelID)
-			model = `${recent.providerID}/${recent.modelID}`;
+		if (recent?.providerID && recent.modelID) {
+			const openCodeModel = catalog.models.find(
+				(item) =>
+					item.providerID === "opencode" &&
+					item.modelID === `${recent.providerID}/${recent.modelID}`,
+			);
+			model = openCodeModel
+				? `opencode/${openCodeModel.modelID}`
+				: `${recent.providerID}/${recent.modelID}`;
+		}
 		else model = preferredModel(selectedProjectId);
 		if (recent?.agent) agent = recent.agent;
 	} catch (reason) {
@@ -336,7 +357,13 @@ $effect(() => {
 	void catalogNonce;
 	if (!projectId) return;
 	const request = ++projectRequest;
-	catalogLoaded = false;
+	const cachedCatalog = chat.cachedCatalog(projectId);
+	if (cachedCatalog) {
+		catalog = cachedCatalog;
+		catalogLoaded = true;
+	} else {
+		catalogLoaded = false;
+	}
 	chat
 		.catalog(projectId)
 		.then((result) => {
@@ -352,7 +379,7 @@ $effect(() => {
 		.then((items) => {
 			if (disposed || request !== projectRequest) return;
 			customAgents = (items as typeof customAgents).filter(
-				(item) => item.status === "active" && item.allowChat,
+				(item) => item.status === "active",
 			);
 			if (
 				customAgentId &&
@@ -677,10 +704,10 @@ async function answer(requestId: string, answers: string[][]) {
     <Button class="fixed inset-0 z-30 h-full w-full rounded-none bg-black/50 md:hidden" variant="ghost" aria-label="Close sidebar backdrop" onclick={() => sidebarOpen = false} />
   {/if}
   <main class="flex min-w-0 flex-1 flex-col">
-    <header class="flex h-14 shrink-0 items-center gap-3 border-b px-4">
+    <header class="flex h-[72px] shrink-0 items-center gap-3 border-b border-white/[0.08] px-5 sm:px-8">
       {#if !sidebarOpen}<Button variant="ghost" size="icon" aria-label="Open sidebar" onclick={() => sidebarOpen = true}><PanelLeft size={16} /></Button>{/if}
-      <div class="min-w-0 flex-1"><p class="truncate text-sm font-medium">{viewMode === "chat" ? (conversation?.session.title ?? "New session") : `Tasks · ${selectedProject?.name ?? "No project"}`}</p>{#if selectedProject}<p class="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground"><span class="truncate">{selectedProject.name}</span><GitBranch size={11} />{selectedProject.defaultBranch}</p>{/if}</div>
-      <Tabs.Root bind:value={viewMode} onValueChange={(value) => syncViewParam(value as ViewMode)} aria-label="Workspace mode"><Tabs.List class="h-8"><Tabs.Trigger value="chat" class="h-6 px-3 text-xs">Chat</Tabs.Trigger><Tabs.Trigger value="kanban" class="h-6 px-3 text-xs">Kanban</Tabs.Trigger>{#if selectedProject}<a href={`/project/${selectedProject.id}/canvas`} class="inline-flex h-6 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-foreground/60 transition-all hover:text-foreground" aria-label="Design canvas"><Sparkles size={12} />Canvas</a>{/if}</Tabs.List></Tabs.Root>
+      <div class="flex min-w-0 flex-1 items-center gap-3"><div class="grid size-9 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/[0.06] shadow-sm"><Sparkles size={16} class="text-cyan-300" /></div><div class="min-w-0"><p class="truncate text-sm font-semibold tracking-[-0.01em]">{viewMode === "chat" ? (conversation?.session.title ?? "New session") : `Tasks · ${selectedProject?.name ?? "No project"}`}</p>{#if selectedProject}<p class="mt-1 flex items-center gap-2 text-[11px] text-white/45"><span class="truncate">{selectedProject.name}</span><span class="text-white/20">·</span><GitBranch size={12} />{selectedProject.defaultBranch}</p>{/if}</div></div>
+      <Tabs.Root bind:value={viewMode} onValueChange={(value) => syncViewParam(value as ViewMode)} aria-label="Workspace mode"><Tabs.List class="h-auto gap-1 rounded-xl border border-white/10 bg-white/[0.04] p-1"><Tabs.Trigger value="chat" class="h-9 gap-2 rounded-lg px-3 text-xs text-white/50 data-[state=active]:bg-white/[0.12] data-[state=active]:text-white data-[state=active]:shadow-sm"><MessageSquare size={14} />Chat</Tabs.Trigger><Tabs.Trigger value="kanban" class="h-9 gap-2 rounded-lg px-3 text-xs text-white/50 data-[state=active]:bg-white/[0.12] data-[state=active]:text-white data-[state=active]:shadow-sm"><Columns3 size={14} />Kanban</Tabs.Trigger>{#if selectedProject}<a href={`/project/${selectedProject.id}/canvas`} class="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-medium text-white/50 transition hover:text-white/80" aria-label="Design canvas"><Sparkles size={14} />Canvas</a>{/if}</Tabs.List></Tabs.Root>
     </header>
     {#if viewMode === "kanban"}
       <div class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -693,9 +720,9 @@ async function answer(requestId: string, answers: string[][]) {
     {:else}
     {#if noModels}<div role="alert" class="flex shrink-0 flex-wrap items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-5 py-3 text-sm text-amber-200"><TriangleAlert size={16} class="shrink-0 text-amber-300" /><p class="min-w-0 flex-1">Connected, but no models are configured in OpenCode. Add a provider (for example, run <code class="rounded bg-black/30 px-1 py-0.5 text-xs">opencode auth login</code>), then restart the daemon.</p><Button variant="outline" size="sm" onclick={reloadModels}><RefreshCw size={13} />Reload models</Button></div>{/if}
     <div bind:this={scroller} onscroll={(event) => { const node = event.currentTarget; follow = node.scrollHeight - node.scrollTop - node.clientHeight < 100; }} class="nice-scroll min-h-0 flex-1 overflow-y-auto">
-      <div class={`mx-auto flex min-h-full w-full max-w-3xl flex-col px-5 ${sessionId ? "py-8" : "justify-center py-12"}`}>
+      <div class={`mx-auto flex min-h-full w-full max-w-[740px] flex-col px-5 ${sessionId ? "py-8" : "justify-center py-12"}`}>
         {#if loading || sessionLoading}<div role="status" class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"><LoaderCircle size={17} class="animate-spin" />Loading {loading ? "workspace" : "conversation"}…</div>
-        {:else if !sessionId}<div class="mb-8 text-center"><div class="mx-auto mb-5 flex size-10 items-center justify-center rounded-xl border bg-card"><Sparkles size={20} class="text-teal-300" /></div><h1 class="text-2xl font-medium tracking-tight sm:text-3xl">What are we working on?</h1><p class="mt-3 text-sm text-muted-foreground">A little context. A clear idea. Let's build something.</p></div>{/if}
+        {:else if !sessionId}<section class="relative isolate -mx-5 flex flex-col items-center px-5 pb-10 pt-[8vh] sm:pt-[12vh]"><div class="pointer-events-none absolute left-1/2 top-24 -z-10 h-80 w-[min(42rem,90vw)] -translate-x-1/2 rounded-full bg-cyan-500/[0.035] blur-3xl"></div><div class="w-full max-w-[700px]"><div class="mb-8 text-center"><div aria-hidden="true" class="relative mx-auto mb-6 size-20"><div class="hero-orbit hero-orbit-one"></div><div class="hero-orbit hero-orbit-two"></div><div class="absolute inset-0 grid place-items-center"><div class="hero-core grid size-12 place-items-center rounded-2xl border border-cyan-200/30 bg-cyan-300/[0.1]"><Sparkles size={20} class="text-cyan-200" /></div></div><span class="hero-node hero-node-one"></span><span class="hero-node hero-node-two"></span><span class="hero-node hero-node-three"></span></div><h1 class="text-3xl font-medium tracking-[-0.04em] text-white sm:text-[38px]">Turn ideas into momentum</h1><p class="mx-auto mt-3 max-w-md text-sm leading-6 text-white/45">Bring a little context. We’ll shape the next step together.</p></div></div></section>{/if}
          {#if sessionId}<div class="space-y-8" aria-live="polite" aria-relevant="additions text">{#each turns as turn (turn.key)}<Turn messages={turn.messages} {sessionId} projectId={selectedProjectId} onfile={showFiles} />{/each}</div>
            {#if busy}<Marker.Root variant="border" class="mt-5 flex items-center"><Marker.Icon><LoaderCircle size={14} class="animate-spin" /></Marker.Icon><Marker.Content>{conversation?.permissions.length ? "Waiting for permission" : conversation?.questions.length ? "Waiting for your answer" : conversation?.status.message || `${providerLabel} is working…`}</Marker.Content></Marker.Root>{/if}
           {#each conversation?.permissions ?? [] as request}<div role="group" aria-label={`Permission required: ${request.permission}`} class="mt-5 space-y-3 rounded-xl border border-amber-500/30 bg-card p-4"><p class="flex items-center gap-2 text-sm font-medium"><ShieldCheck size={16} />Permission required: {request.permission}</p>{#if request.patterns.length}<pre class="overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{request.patterns.join("\n")}</pre>{/if}<div class="flex flex-wrap gap-2"><Button size="sm" disabled={permissionReplying === request.id} onclick={() => permission(request.id, "once")}>Accept once</Button><Button variant="outline" size="sm" disabled={permissionReplying === request.id} onclick={() => permission(request.id, "always")}>Always allow</Button><Button variant="ghost" size="sm" disabled={permissionReplying === request.id} onclick={() => permission(request.id, "reject")}>Decline</Button></div></div>{/each}
@@ -704,10 +731,10 @@ async function answer(requestId: string, answers: string[][]) {
 
         {#if error}<div role="alert" class="my-4 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm"><p class="min-w-0 flex-1 break-words text-destructive">{error}</p><Button variant="ghost" size="sm" onclick={retryConnection}><RefreshCw size={13} />Retry</Button><Button variant="ghost" size="icon" class="size-7" aria-label="Dismiss error" onclick={() => error = ""}><X size={13} /></Button></div>{/if}
         {#if !sessionId && !loading}
-          {#if !projects.length}<div class="mb-5 text-center"><p class="mb-3 text-sm text-muted-foreground">Add a local Git project to start chatting with OpenCode.</p><Button onclick={() => addProjectOpen = true}><FolderPlus size={16} />Add project</Button></div>{:else}<div class="mb-3"><Select.Root type="single" bind:value={selectedProjectId}><Select.Trigger class="w-auto min-w-40 border-0 bg-transparent shadow-none" aria-label="Choose project"><Folder size={14} />{selectedProject?.name ?? "Choose project"}</Select.Trigger><Select.Content>{#each projects as project}<Select.Item value={project.id}>{project.name}</Select.Item>{/each}</Select.Content></Select.Root></div>{/if}
+          {#if !projects.length}<div class="mb-5 text-center"><p class="mb-3 text-sm text-muted-foreground">Add a local Git project to start chatting with OpenCode.</p><Button onclick={() => addProjectOpen = true}><FolderPlus size={16} />Add project</Button></div>{:else}<div class="mb-3"><Select.Root type="single" bind:value={selectedProjectId}><Select.Trigger class="h-10 w-auto min-w-40 gap-2 rounded-lg border border-white/10 bg-white/[0.05] px-3 text-sm text-white/75 shadow-none transition hover:bg-white/[0.08]" aria-label="Choose project"><Folder size={16} class="text-white/55" />{selectedProject?.name ?? "Choose project"}</Select.Trigger><Select.Content>{#each projects as project}<Select.Item value={project.id}>{project.name}</Select.Item>{/each}</Select.Content></Select.Root></div>{/if}
            <Composer projectId={selectedProjectId} {catalog} {customAgents} {busy} disabled={!selectedProjectId || loading} onsend={send} onstop={stop} bind:draft bind:model bind:agent bind:customAgentId autoAccept={selectedProject?.autoAccept ?? false} onAutoAcceptChange={selectedProject ? (value) => void setAutoAccept(value) : undefined} />
 
-          <div class="mt-5 flex flex-wrap justify-center gap-2">{#each prompts as prompt}<Button variant="outline" size="sm" class="rounded-full text-xs text-muted-foreground" onclick={() => draft = prompt.text}>{prompt.label}</Button>{/each}</div>
+          <div class="mt-5 flex flex-wrap justify-center gap-2">{#each prompts as prompt}<Button variant="outline" size="sm" class="rounded-full border-white/10 bg-white/[0.025] px-3.5 py-2 text-xs text-white/55 transition hover:border-white/20 hover:bg-white/[0.07] hover:text-white/80" onclick={() => draft = prompt.text}>{prompt.label}</Button>{/each}</div>
         {/if}
       </div>
     </div>

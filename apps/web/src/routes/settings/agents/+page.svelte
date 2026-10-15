@@ -9,6 +9,7 @@ import * as Command from "$lib/components/ui/command/index.js";
 import { Input } from "$lib/components/ui/input";
 import * as Popover from "$lib/components/ui/popover/index.js";
 import * as Select from "$lib/components/ui/select/index.js";
+import { Textarea } from "$lib/components/ui/textarea/index.js";
 import { daemon } from "$lib/daemon";
 
 type Skill = {
@@ -111,9 +112,6 @@ const presets: Record<string, string[]> = {
 	],
 };
 let agents = $state<Agent[]>([]);
-let runHistory = $state<Array<{ agentId: string; createdAt: string | number }>>(
-	[],
-);
 let providers = $state<Awaited<ReturnType<typeof daemon.listProviders>>>([]);
 let models = $state<Awaited<ReturnType<typeof daemon.listModels>>>([]);
 let projects = $state<Awaited<ReturnType<typeof daemon.listProjects>>>([]);
@@ -187,6 +185,21 @@ const selectedSupportsEffort = $derived(
 		.find((m) => String(m.metadata?.modelId ?? m.name) === selectedModel)
 		?.capabilities.includes("reasoning") ?? false,
 );
+function modelDisplayName(providerId: string, modelId: string | null) {
+	if (!modelId) return "provider default";
+	const unprefixedId = modelId.startsWith(`${providerId}/`)
+		? modelId.slice(providerId.length + 1)
+		: modelId;
+	const match = models.find((model) => {
+		if (model.providerId !== providerId) return false;
+		const id = String(model.metadata?.modelId ?? model.name);
+		return id === modelId || id === unprefixedId || model.name === unprefixedId;
+	});
+	return match?.displayName ?? unprefixedId;
+}
+function providerDisplayName(providerId: string) {
+	return providers.find((provider) => provider.providerId === providerId)?.name ?? providerId;
+}
 const visibleAgents = $derived(
 	agents.filter((a) =>
 		`${a.label} ${a.role} ${a.provider}`
@@ -197,6 +210,13 @@ const visibleAgents = $derived(
 
 onMount(async () => {
 	try {
+		// OpenCode can start outside Loom, so refresh its health before filtering
+		// the provider list for connected agents.
+		const openCode = await daemon
+			.refreshProvider("opencode")
+			.catch(() => undefined);
+		if (openCode?.status === "connected")
+			await daemon.refreshProviderModels("opencode").catch(() => undefined);
 		[providers, models, projects] = await Promise.all([
 			daemon.listProviders(),
 			daemon.listModels(),
@@ -218,10 +238,7 @@ onMount(async () => {
 });
 
 async function reload() {
-	[agents, runHistory] = await Promise.all([
-		daemon.listCustomAgents(projectId || undefined) as Promise<Agent[]>,
-		daemon.listCustomAgentRuns(projectId || undefined),
-	]);
+	agents = (await daemon.listCustomAgents(projectId || undefined)) as Agent[];
 }
 function resetForm() {
 	editingId = "";
@@ -374,11 +391,10 @@ async function saveAgent() {
 		!label.trim() ||
 		label.trim().length < 2 ||
 		!selectedProvider ||
-		(!allowChat && !allowCanvas && !allowKanban) ||
 		!skills.some((s) => s.enabled)
 	) {
 		error =
-			"Isi label, provider, minimal satu surface, dan aktifkan minimal satu skill.";
+			"Isi label dan provider, lalu aktifkan minimal satu skill.";
 		return;
 	}
 	if (
@@ -409,9 +425,9 @@ async function saveAgent() {
 		systemInstructions: instructions,
 		status: "active",
 		executionMode,
-		allowChat,
-		allowCanvas,
-		allowKanban,
+		allowChat: true,
+		allowCanvas: true,
+		allowKanban: true,
 		approvalPolicy,
 		maxRunDurationMinutes: Number(maxRunDurationMinutes),
 		maxRetries: Number(maxRetries),
@@ -465,14 +481,6 @@ function duplicateAgent(agent: Agent) {
 	editingId = "";
 	label = `${agent.label} copy`.slice(0, 60);
 }
-function lastUsed(agentId: string) {
-	const run = runHistory.find((item) => item.agentId === agentId);
-	if (!run) return "Never used";
-	const time = new Date(run.createdAt).getTime();
-	if (!Number.isFinite(time)) return "Recently used";
-	const minutes = Math.max(0, Math.floor((Date.now() - time) / 60_000));
-	return minutes < 1 ? "Used just now" : `Used ${minutes}m ago`;
-}
 </script>
 
 <svelte:head><title>Agents · Loom</title></svelte:head>
@@ -480,20 +488,22 @@ function lastUsed(agentId: string) {
 	<div class="mb-8 flex flex-wrap items-start justify-between gap-4"><div><p class="mb-2 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Settings · Agents</p><h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">Agents</h1><p class="mt-2 max-w-2xl text-sm text-neutral-500">Create reusable workers for design, coding, planning, and testing. Agents only run when you explicitly call them.</p></div><Button onclick={resetForm}><Plus class="size-4" />Create agent</Button></div>
 	{#if showForm}
 	<AlertDialog.Root bind:open={showForm}>
-		<AlertDialog.Content class="max-h-[90vh] w-[calc(100vw-2rem)] max-w-lg overflow-y-auto rounded-xl border border-border bg-background p-0 text-foreground">
-			<AlertDialog.Header class="relative border-b px-6 py-5 pr-14 text-left">
+		<AlertDialog.Content class="flex h-fit max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-2xl flex-col gap-0 overflow-hidden rounded-xl border border-border bg-background p-0 text-foreground">
+			<AlertDialog.Header class="relative shrink-0 border-b px-6 py-4 pr-14 text-left">
 				<div class="space-y-1">
 					<AlertDialog.Title>{editingId ? "Edit Agent" : "Add Agent"}</AlertDialog.Title>
 					<AlertDialog.Description>Configure an AI agent for your workspace</AlertDialog.Description>
 				</div>
 				<Button variant="ghost" size="icon" class="absolute right-4 top-4 size-8 shrink-0 rounded-md border border-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground focus-visible:ring-2" aria-label="Close dialog" onclick={() => showForm = false}><X class="size-4" /></Button>
 			</AlertDialog.Header>
-			<div class="space-y-4 px-6 py-5">
-				<label class="block space-y-2 text-sm">
+			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4">
+			<div class="flex flex-col gap-4">
+			<div class="grid gap-4 sm:grid-cols-2">
+				<label class="flex flex-col gap-2 text-sm">
 					<span>Agent Name</span>
 					<Input bind:value={label} maxlength={60} placeholder="e.g., Code Reviewer Bot" />
 				</label>
-				<label class="block space-y-2 text-sm">
+				<label class="flex flex-col gap-2 text-sm">
 					<span>Role</span>
 					<Popover.Root bind:open={roleOpen}>
 						<Popover.Trigger class="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 text-left">
@@ -519,7 +529,9 @@ function lastUsed(agentId: string) {
 						</Popover.Content>
 					</Popover.Root>
 				</label>
-				<label class="block space-y-2 text-sm">
+			</div>
+			<div class="grid gap-4 sm:grid-cols-2">
+				<label class="flex flex-col gap-2 text-sm">
 					<span>Provider</span>
 					<Select.Root type="single" value={selectedProvider || "__none"} onValueChange={(value) => { selectedProvider = value === "__none" ? "" : value; selectedModel = ""; modelQuery = ""; }}>
 						<Select.Trigger class="w-full">{connected.find((provider) => provider.providerId === selectedProvider)?.name ?? "Select a provider…"}</Select.Trigger>
@@ -529,7 +541,7 @@ function lastUsed(agentId: string) {
 						</Select.Content>
 					</Select.Root>
 				</label>
-				<label class="block space-y-2 text-sm">
+				<label class="flex flex-col gap-2 text-sm">
 					<span>Model</span>
 					<Popover.Root bind:open={modelOpen}>
 						<Popover.Trigger class="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 text-left" disabled={!selectedProvider}>
@@ -557,8 +569,9 @@ function lastUsed(agentId: string) {
 						</Popover.Content>
 					</Popover.Root>
 				</label>
+			</div>
 				{#if selectedSupportsEffort}
-					<label class="block space-y-2 text-sm">
+					<label class="flex flex-col gap-2 text-sm">
 						<span>Reasoning effort</span>
 						<Select.Root type="single" value={effort || "__default"} onValueChange={(value) => effort = value === "__default" ? "" : value}>
 						<Select.Trigger class="w-full">{effortNames[effort] ?? "Default"}</Select.Trigger>
@@ -567,32 +580,35 @@ function lastUsed(agentId: string) {
 					</label>
 				{/if}
 				{#if !connected.length}<p class="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-200">Connect a provider in <a class="underline" href="/settings/providers">Provider settings</a> before saving an agent.</p>{/if}
-				<label class="block space-y-2 text-sm">
-					<span class="font-medium">System Prompt <span class="font-normal text-muted-foreground">(Optional)</span></span>
-					<textarea class="min-h-28 w-full rounded-md border border-input bg-background p-3 text-sm" bind:value={instructions} maxlength="24000" placeholder="Act as a code reviewer. Focus on…"></textarea>
-					<span class="block text-xs text-muted-foreground">A built-in {roleNames[role] ?? role} starter prompt is prefilled. Edit or clear it to customize this agent.</span>
-				</label>
-				<label class="block space-y-2 text-sm">
+				<label class="flex flex-col gap-2 text-sm">
 					<span>Fallback Agent <span class="font-normal text-muted-foreground">(Optional)</span></span>
 					<Select.Root type="single" value={fallbackAgentId || "__none"} onValueChange={(value) => chooseFallbackAgent(value === "__none" ? "" : value)}>
 						<Select.Trigger class="w-full">{agents.find((agent) => agent.id === fallbackAgentId)?.label ?? "No fallback agent"}</Select.Trigger>
 						<Select.Content>
 							<Select.Item value="__none">No fallback agent</Select.Item>
-							{#each agents.filter((agent) => agent.id !== editingId && agent.status === "active" && agent.provider !== selectedProvider) as agent}<Select.Item value={agent.id}>{agent.label} · {agent.provider} / {agent.modelId ?? "default"}</Select.Item>{/each}
+							{#each agents.filter((agent) => agent.id !== editingId && agent.status === "active" && agent.provider !== selectedProvider) as agent}<Select.Item value={agent.id}>{agent.label} · {providerDisplayName(agent.provider)} / {modelDisplayName(agent.provider, agent.modelId)}</Select.Item>{/each}
 						</Select.Content>
 					</Select.Root>
 					<p class="text-xs text-muted-foreground">If the primary provider reaches a limit, this agent can be used as a fallback.</p>
 				</label>
+				<label class="flex flex-col gap-2 text-sm">
+					<span class="font-medium">System Prompt <span class="font-normal text-muted-foreground">(Optional)</span></span>
+					<Textarea id="agent-system-prompt" class="min-h-24 max-h-40" bind:value={instructions} maxlength={24000} placeholder="Act as a code reviewer. Focus on…" />
+					<span class="text-xs text-muted-foreground">A built-in {roleNames[role] ?? role} starter prompt is prefilled. Edit or clear it to customize this agent.</span>
+				</label>
 				{#if error}<p class="text-sm text-destructive" role="alert">{error}</p>{/if}
 			</div>
-			<AlertDialog.Footer class="border-t px-6 py-4">
+			</div>
+			<AlertDialog.Footer class="shrink-0 border-t bg-background px-6 py-3">
 				<Button variant="ghost" onclick={() => showForm = false}>Cancel</Button>
 				<Button disabled={saving || !connected.length} onclick={() => void saveAgent()}><Save class="size-4" />{saving ? "Saving…" : editingId ? "Save changes" : "Create Agent"}</Button>
 			</AlertDialog.Footer>
 		</AlertDialog.Content>
 	</AlertDialog.Root>
 	{:else if loading}<p class="rounded-xl border border-white/10 p-6 text-sm text-neutral-500">Loading agents…</p>
-	{:else if !visibleAgents.length}<section class="rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><Bot class="mx-auto size-8 text-neutral-500" /><h2 class="mt-4 font-semibold">No agents yet</h2><p class="mx-auto mt-2 max-w-lg text-sm text-neutral-500">Create a reusable agent for UI/UX, frontend, backend, QA, project planning, or a workflow unique to your project.</p><Button class="mt-5" onclick={resetForm}><Plus class="size-4" />Create your first agent</Button></section>
-	{:else}<div class="mb-4 flex flex-wrap items-center justify-between gap-3"><Input class="max-w-sm" bind:value={search} placeholder="Search agents…" /><Select.Root type="single" value={projectId || "__all_projects"} onValueChange={(value) => { projectId = value === "__all_projects" ? "" : value; void reload(); }}><Select.Trigger class="w-auto min-w-48">{projects.find((project) => project.id === projectId)?.name ?? "All project agents"}</Select.Trigger><Select.Content><Select.Item value="__all_projects">All project agents</Select.Item>{#each projects as project}<Select.Item value={project.id}>{project.name}</Select.Item>{/each}</Select.Content></Select.Root></div><div class="grid gap-4 lg:grid-cols-2">{#each visibleAgents as agent}<article class="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div class="flex items-start gap-3"><span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white/10"><Bot class="size-5" /></span><div class="min-w-0 flex-1"><h2 class="truncate font-semibold">{agent.label}</h2><p class="mt-1 text-sm text-neutral-400">{roleNames[agent.role] ?? agent.role} · {agent.provider} / {agent.modelId ?? "provider default"}</p><p class="mt-3 text-sm text-neutral-500">Skills: {agent.skills?.filter((s) => s.enabled).map((s) => s.name).join(", ") || "None"}</p><p class="mt-1 text-xs text-neutral-500">Available in: {[agent.allowChat && "Chat", agent.allowCanvas && "Canvas", agent.allowKanban && "Kanban"].filter(Boolean).join(" · ") || "No surfaces"}</p><p class="mt-1 text-xs text-neutral-500">{lastUsed(agent.id)}</p><span class={`mt-3 inline-flex rounded-full px-2.5 py-1 text-xs ${agent.status === "active" ? "bg-emerald-500/10 text-emerald-300" : agent.status === "needs_attention" ? "bg-amber-500/10 text-amber-300" : "bg-white/10 text-neutral-400"}`}>{agent.status === "active" ? "Active" : agent.status === "needs_attention" ? "Needs attention" : "Disabled"}</span></div></div><div class="mt-5 flex justify-end gap-2"><Button variant="ghost" size="sm" onclick={() => void toggleAgent(agent)}>{agent.status === "active" ? "Disable" : "Enable"}</Button><Button variant="outline" size="sm" onclick={() => duplicateAgent(agent)}>Duplicate</Button><Button variant="outline" size="sm" onclick={() => editAgent(agent)}>Edit</Button><Button variant="ghost" size="icon-sm" aria-label={`Delete ${agent.label}`} onclick={() => void deleteAgent(agent)}><Trash2 class="size-4" /></Button></div></article>{/each}</div>{/if}
+	{:else if !agents.length}<section class="rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><Bot class="mx-auto size-8 text-neutral-500" /><h2 class="mt-4 font-semibold">No agents yet</h2><p class="mx-auto mt-2 max-w-lg text-sm text-neutral-500">Create a reusable agent for UI/UX, frontend, backend, QA, project planning, or a workflow unique to your project.</p><Button class="mt-5" onclick={resetForm}><Plus class="size-4" />Create your first agent</Button></section>
+	{:else}<div class="mb-4 flex flex-wrap items-center justify-between gap-3"><Input class="max-w-sm" bind:value={search} placeholder="Search agents…" /><Select.Root type="single" value={projectId || "__all_projects"} onValueChange={(value) => { projectId = value === "__all_projects" ? "" : value; search = ""; void reload(); }}><Select.Trigger class="w-auto min-w-48">{projects.find((project) => project.id === projectId)?.name ?? "All project agents"}</Select.Trigger><Select.Content><Select.Item value="__all_projects">All project agents</Select.Item>{#each projects as project}<Select.Item value={project.id}>{project.name}</Select.Item>{/each}</Select.Content></Select.Root></div>
+		{#if !visibleAgents.length}<section class="rounded-2xl border border-dashed border-white/15 px-6 py-12 text-center"><Bot class="mx-auto size-8 text-neutral-500" /><h2 class="mt-4 font-semibold">No matching agents</h2><p class="mt-2 text-sm text-neutral-500">Try another name, role, or provider.</p><Button class="mt-4" variant="outline" onclick={() => search = ""}>Clear search</Button></section>
+		{:else}<div class="grid gap-4 lg:grid-cols-2">{#each visibleAgents as agent}<article class="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div class="flex items-start gap-3"><span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white/10"><Bot class="size-5" /></span><div class="min-w-0 flex-1"><h2 class="truncate font-semibold">{agent.label}</h2><p class="mt-1 text-sm text-neutral-400">{roleNames[agent.role] ?? agent.role} · {providerDisplayName(agent.provider)} / {modelDisplayName(agent.provider, agent.modelId)}</p><p class="mt-3 text-sm text-neutral-500">Skills: {agent.skills?.filter((s) => s.enabled).map((s) => s.name).join(", ") || "None"}</p><span class={`mt-3 inline-flex rounded-full px-2.5 py-1 text-xs ${agent.status === "active" ? "bg-emerald-500/10 text-emerald-300" : agent.status === "needs_attention" ? "bg-amber-500/10 text-amber-300" : "bg-white/10 text-neutral-400"}`}>{agent.status === "active" ? "Active" : agent.status === "needs_attention" ? "Needs attention" : "Disabled"}</span></div></div><div class="mt-5 flex justify-end gap-2"><Button variant="ghost" size="sm" onclick={() => void toggleAgent(agent)}>{agent.status === "active" ? "Disable" : "Enable"}</Button><Button variant="outline" size="sm" onclick={() => duplicateAgent(agent)}>Duplicate</Button><Button variant="outline" size="sm" onclick={() => editAgent(agent)}>Edit</Button><Button variant="ghost" size="icon-sm" aria-label={`Delete ${agent.label}`} onclick={() => void deleteAgent(agent)}><Trash2 class="size-4" /></Button></div></article>{/each}</div>{/if}{/if}
 	{#if error && !showForm}<p class="mt-4 text-sm text-red-400" role="alert">{error}</p>{/if}
 	</div></main></div></div>

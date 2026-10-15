@@ -65,11 +65,6 @@ const agentInput = z
 		skills: z.array(skillInput).max(20).default([]),
 	})
 	.superRefine((a, ctx) => {
-		if (!a.allowChat && !a.allowCanvas && !a.allowKanban)
-			ctx.addIssue({
-				code: "custom",
-				message: "Choose at least one available surface",
-			});
 		if (!a.skills.some((s) => s.enabled))
 			ctx.addIssue({ code: "custom", message: "Enable at least one skill" });
 		if (a.skills.some((s) => s.enabled && s.allowCanvas && s.canWriteFiles))
@@ -277,9 +272,9 @@ export function createAgentSettingsRoutes(options: Options) {
 				systemInstructions: input.systemInstructions,
 				status: input.status,
 				executionMode: input.executionMode,
-				allowChat: input.allowChat,
-				allowCanvas: input.allowCanvas,
-				allowKanban: input.allowKanban,
+				allowChat: true,
+				allowCanvas: true,
+				allowKanban: true,
 				approvalPolicy: input.approvalPolicy,
 				maxRunDurationMinutes: input.maxRunDurationMinutes,
 				maxRetries: input.maxRetries,
@@ -329,9 +324,9 @@ export function createAgentSettingsRoutes(options: Options) {
 					systemInstructions: input.systemInstructions,
 					status: input.status,
 					executionMode: input.executionMode,
-					allowChat: input.allowChat,
-					allowCanvas: input.allowCanvas,
-					allowKanban: input.allowKanban,
+					allowChat: true,
+					allowCanvas: true,
+					allowKanban: true,
 					approvalPolicy: input.approvalPolicy,
 					maxRunDurationMinutes: input.maxRunDurationMinutes,
 					maxRetries: input.maxRetries,
@@ -383,11 +378,6 @@ export function createAgentSettingsRoutes(options: Options) {
 			return c.json(
 				{ error: { message: "Agent is missing or disabled" } },
 				404,
-			);
-		if (body.trigger === "chat" ? !agent.allowChat : !agent.allowKanban)
-			return c.json(
-				{ error: { message: `This agent is not enabled for ${body.trigger}` } },
-				403,
 			);
 		if (agent.approvalPolicy !== "read_only")
 			return c.json(
@@ -600,9 +590,9 @@ export function createAgentSettingsRoutes(options: Options) {
 			.parse(await c.req.json());
 		const agent = await load(input.agentId);
 		const task = await options.tasks.getById(input.taskId);
-		if (!agent || agent.status !== "active" || !agent.allowKanban)
+		if (!agent || agent.status !== "active")
 			return c.json(
-				{ error: { message: "Active Kanban agent not found" } },
+				{ error: { message: "Active agent not found" } },
 				404,
 			);
 		if (
@@ -650,7 +640,6 @@ export function createAgentSettingsRoutes(options: Options) {
 		if (
 			!task ||
 			!agent ||
-			!agent.allowKanban ||
 			task.projectId !== assignment.projectId ||
 			["completed", "blocked", "failed", "cancelled"].includes(task.status)
 		)

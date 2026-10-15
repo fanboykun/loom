@@ -325,6 +325,19 @@ export function createChatRoutes(options: {
 	let cachedCatalog: Awaited<ReturnType<typeof buildCatalog>> | null = null;
 	let catalogPromise: Promise<Awaited<ReturnType<typeof buildCatalog>>> | null =
 		null;
+	let catalogVersion = 0;
+	options.providerManager?.subscribe((event) => {
+		if (
+			event.type === "provider.modelsUpdated" ||
+			event.type === "provider.connected" ||
+			event.type === "provider.disconnected" ||
+			event.type === "provider.authRequired"
+		) {
+			catalogVersion += 1;
+			cachedCatalog = null;
+			catalogPromise = null;
+		}
+	});
 	async function buildCatalog(projectId: string) {
 		const root = await directory(projectId);
 		const [providers, agents, commands] = await Promise.all([
@@ -482,17 +495,21 @@ export function createChatRoutes(options: {
 	app.get("/catalog", async (c) => {
 		const projectId = c.req.query("projectId") ?? "";
 		if (cachedCatalog) return c.json(cachedCatalog);
+		const version = catalogVersion;
 		if (!catalogPromise) {
-			catalogPromise = (async () => {
-				if (options.providerManager)
-					await options.providerManager.refreshAll({ refreshModels: true });
+			const pending = (async () => {
+				// Provider discovery/model refresh runs in the daemon background.
+				// Re-running it here made the first composer request wait on every
+				// installed CLI and often exceed Bun's request timeout.
 				return buildCatalog(projectId);
 			})().finally(() => {
-				catalogPromise = null;
+				if (catalogPromise === pending) catalogPromise = null;
 			});
+			catalogPromise = pending;
 		}
-		cachedCatalog = await catalogPromise;
-		return c.json(cachedCatalog);
+		const result = await catalogPromise;
+		if (version === catalogVersion) cachedCatalog = result;
+		return c.json(result);
 	});
 	app.get("/files", async (c) => {
 		const root = await directory(c.req.query("projectId"));
@@ -568,9 +585,9 @@ export function createChatRoutes(options: {
 		if (input.customAgentId && !customAgent)
 			throw new HTTPException(404, { message: "Custom agent not found" });
 		if (customAgent) {
-			if (!customAgent.allowChat || customAgent.status !== "active")
+			if (customAgent.status !== "active")
 				throw new HTTPException(403, {
-					message: "This custom agent is disabled for Chat",
+					message: "This custom agent is disabled",
 				});
 			if (customAgent.projectId && customAgent.projectId !== current.projectId)
 				throw new HTTPException(403, {
@@ -657,7 +674,7 @@ export function createChatRoutes(options: {
 		]
 			.filter(Boolean)
 			.join("\n\n");
-		const openCodePromptText = [
+		const openCodeSystemPrompt = [
 			customAgent
 				? `Custom agent: ${customAgent.label} (${customAgent.role})\n${customAgent.roleDescription ?? ""}\n${customAgent.systemInstructions}\n${customAgent.skills
 						.filter((skill) => skill.enabled && skill.allowChat)
@@ -667,7 +684,6 @@ export function createChatRoutes(options: {
 						)}\n\nRespect the Loom approval policy and project boundary.`
 				: "",
 			designInstruction,
-			input.text ? `User request:\n${input.text}` : "",
 			designNodes.length
 				? `Attached Canvas nodes: ${designNodes.map((node) => `${node.title} (${node.viewport}): ${node.brief}`).join("; ")}. Inspect the attached HTML files as the visual source of truth.`
 				: "",
@@ -681,6 +697,19 @@ export function createChatRoutes(options: {
 				? { providerID: customAgent.provider, modelID: customAgent.modelId }
 				: undefined
 			: input.model;
+		const openCodeModel =
+			providerId === "opencode" && requestedModel
+				? (() => {
+						const [upstreamProviderId, ...upstreamModelParts] =
+							requestedModel.modelID.split("/");
+						return upstreamModelParts.length
+							? {
+									providerID: upstreamProviderId,
+									modelID: upstreamModelParts.join("/"),
+								}
+							: requestedModel;
+					})()
+				: undefined;
 		const runtimeModel =
 			providerId && requestedModel
 				? (() => {
@@ -911,23 +940,16 @@ export function createChatRoutes(options: {
 		);
 		await request(`/session/${current.id}/prompt_async`, current.directory, {
 			agent: input.agent,
-			model: customAgent?.modelId
-				? { providerID: customAgent.provider, modelID: customAgent.modelId }
-				: input.model,
+			...(openCodeSystemPrompt ? { system: openCodeSystemPrompt } : {}),
+			...(openCodeModel ? { model: openCodeModel } : {}),
 			parts: [
-				{ type: "text", text: openCodePromptText },
-				...designNodes.flatMap((node) => [
-					{
-						type: "text",
-						text: `Canvas design attached: ${node.title} (${node.viewport}) — ${node.brief}`,
-					},
-					{
+				...(input.text ? [{ type: "text", text: input.text }] : []),
+				...designNodes.map((node) => ({
 						type: "file",
 						mime: "text/html",
 						filename: `canvas-design:${node.id}.html`,
 						url: `data:text/html;base64,${Buffer.from(node.html).toString("base64")}`,
-					},
-				]),
+					})),
 				...files,
 				...input.attachments.map((attachment) => ({
 					type: "file",

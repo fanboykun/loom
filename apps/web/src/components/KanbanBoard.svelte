@@ -81,7 +81,7 @@ async function openAddTask() {
 		const agents = await daemon.listCustomAgents(projectId);
 		availableAgents = agents
 			.filter(
-				(agent) => agent.status === "active" && agent.allowKanban === true,
+				(agent) => agent.status === "active",
 			)
 			.map((agent) => ({
 				id: String(agent.id),

@@ -281,6 +281,10 @@ export const daemon = {
 			providerId: string;
 			status: string;
 		}>(`/api/providers/${id}/refresh`, { method: "POST" }),
+	refreshProviderModels: (id: string) =>
+		request<unknown[]>(`/api/providers/${encodeURIComponent(id)}/models/refresh`, {
+			method: "POST",
+		}),
 	listModels: () =>
 		request<
 			Array<{

@@ -87,6 +87,43 @@ export type Catalog = {
 };
 const root = "/api/chat";
 const catalogCache = new Map<string, Catalog>();
+const catalogRequests = new Map<string, Promise<Catalog>>();
+const catalogStorageKey = (projectId: string) => `loom.chat.catalog.${projectId}`;
+function isCatalog(value: unknown): value is Catalog {
+	if (!value || typeof value !== "object") return false;
+	const catalog = value as Partial<Catalog>;
+	return (
+		Array.isArray(catalog.models) &&
+		!!catalog.defaults &&
+		typeof catalog.defaults === "object" &&
+		Array.isArray(catalog.agents) &&
+		Array.isArray(catalog.commands)
+	);
+}
+function readCachedCatalog(projectId: string): Catalog | undefined {
+	const cached = catalogCache.get(projectId);
+	if (cached) return cached;
+	if (typeof localStorage === "undefined") return undefined;
+	try {
+		const value: unknown = JSON.parse(
+			localStorage.getItem(catalogStorageKey(projectId)) ?? "null",
+		);
+		if (!isCatalog(value)) return undefined;
+		catalogCache.set(projectId, value);
+		return value;
+	} catch {
+		return undefined;
+	}
+}
+function writeCachedCatalog(projectId: string, value: Catalog) {
+	catalogCache.set(projectId, value);
+	if (typeof localStorage === "undefined") return;
+	try {
+		localStorage.setItem(catalogStorageKey(projectId), JSON.stringify(value));
+	} catch {
+		// Browser storage can be disabled or full; the in-memory cache still works.
+	}
+}
 const post = <T>(path: string, body: unknown = {}) =>
 	request<T>(root + path, { method: "POST", body: JSON.stringify(body) });
 export const chat = {
@@ -120,13 +157,21 @@ export const chat = {
 		}),
 	diff: (id: string) =>
 		request<FileDiff[]>(`${root}/sessions/${encodeURIComponent(id)}/diff`),
-	catalog: async (projectId: string) => {
-		const cached = catalogCache.get(projectId);
-		if (cached) return cached;
-		const result = await request<Catalog>(
+	cachedCatalog: (projectId: string) => readCachedCatalog(projectId),
+	catalog: (projectId: string) => {
+		const pending = catalogRequests.get(projectId);
+		if (pending) return pending;
+		const result = request<Catalog>(
 			`${root}/catalog?projectId=${encodeURIComponent(projectId)}`,
-		);
-		catalogCache.set(projectId, result);
+		).then((catalog) => {
+			writeCachedCatalog(projectId, catalog);
+			return catalog;
+		});
+		catalogRequests.set(projectId, result);
+		void result.finally(() => {
+			if (catalogRequests.get(projectId) === result)
+				catalogRequests.delete(projectId);
+		}).catch(() => {});
 		return result;
 	},
 	files: (projectId: string, query: string) =>

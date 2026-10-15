@@ -17,6 +17,7 @@ import {
 	type FileDiff,
 } from "$lib/chat";
 import { Button } from "$lib/components/ui/button";
+import { Badge } from "$lib/components/ui/badge";
 import * as Marker from "$lib/components/ui/marker";
 import { type DesignNode, daemon } from "$lib/daemon";
 import CodeBlock from "./CodeBlock.svelte";
@@ -49,9 +50,33 @@ const providerLabel = $derived(
 				? "Codex"
 				: "OpenCode",
 );
+const modelTone = $derived(
+	providerID === "agy" || providerID === "antigravity"
+		? "agy"
+		: providerID === "claude" || providerID === "anthropic"
+			? "claude"
+			: providerID === "codex" || providerID === "openai"
+				? "codex"
+				: providerID === "opencode"
+					? "opencode"
+					: "default",
+);
 const modelID = $derived(messages.find((m) => m.info.modelID)?.info.modelID);
 const time = $derived(first ? first.info.time.created : Date.now());
 const error = $derived(messages.find((m) => m.info.error)?.info.error);
+const responseText = $derived(
+	messages
+		.flatMap((message) => message.parts)
+		.filter((part) => part.type === "text")
+		.map((part) => part.text)
+		.filter(Boolean)
+		.join("\n\n"),
+);
+const canCopyResponse = $derived(
+	role === "assistant" &&
+	!!responseText.trim() &&
+	messages[messages.length - 1]?.info.time.completed !== undefined,
+);
 
 let copied = $state(false);
 
@@ -271,13 +296,7 @@ function statusOf(part: ChatPart) {
 
 async function copy() {
 	try {
-		await navigator.clipboard.writeText(
-			messages
-				.flatMap((m) => m.parts)
-				.filter((p) => p.type === "text")
-				.map((p) => p.text)
-				.join("\n\n"),
-		);
+		await navigator.clipboard.writeText(responseText);
 		copied = true;
 		setTimeout(() => {
 			copied = false;
@@ -292,7 +311,7 @@ async function copy() {
 	<div class="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
 		<span class="font-medium text-foreground">{role === "user" ? "You" : providerLabel}</span>
 		{#if agent}<span>{agent}</span>{/if}
-		{#if modelID}<span class="truncate">{modelID}</span>{/if}
+		{#if modelID}<Badge variant="outline" class={`model-badge model-badge--${modelTone} max-w-64 truncate`}>{modelID}</Badge>{/if}
 		<time class="ml-auto shrink-0">{new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
 	</div>
 	{#if role === "user"}
@@ -378,6 +397,6 @@ async function copy() {
 			{/each}
 			{#if error}<p class="mt-3 rounded-lg border border-destructive/30 p-3 text-sm text-destructive" role="alert">{error.data?.message || error.name}</p>{/if}
 		</div>
-		<Button variant="ghost" size="sm" class="mt-1 text-xs text-muted-foreground" onclick={copy}>{#if copied}<Check size={13} />{:else}<Copy size={13} />{/if}{copied ? "Copied" : "Copy response"}</Button>
+		{#if canCopyResponse}<Button variant="ghost" size="sm" class="mt-1 text-xs text-muted-foreground" onclick={copy}>{#if copied}<Check size={13} />{:else}<Copy size={13} />{/if}{copied ? "Copied" : "Copy response"}</Button>{/if}
 	{/if}
 </article>

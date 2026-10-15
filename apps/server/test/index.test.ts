@@ -115,6 +115,7 @@ async function createTestSetup() {
 		orchestrator,
 		plannerRuntime: new FakeAgentRuntime(),
 		startOpenCode: false,
+		initializeProviders: false,
 	});
 	return { daemon, database, home, root, project };
 }
