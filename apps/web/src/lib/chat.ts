@@ -54,6 +54,19 @@ export type FileDiff = {
 	deletions: number;
 	status?: string;
 };
+export type WorkspaceFileEntry = {
+	name: string;
+	path: string;
+	type: "file" | "directory";
+};
+export type WorkspaceFilePreview = {
+	path: string;
+	content: string | null;
+	binary: boolean;
+	complete: boolean;
+	byteSize: number;
+	revision: string;
+};
 export type Question = {
 	id: string;
 	questions: Array<{
@@ -97,7 +110,8 @@ export type Catalog = {
 const root = "/api/chat";
 const catalogCache = new Map<string, Catalog>();
 const catalogRequests = new Map<string, Promise<Catalog>>();
-const catalogStorageKey = (projectId: string) => `loom.chat.catalog.${projectId}`;
+const catalogStorageKey = (projectId: string) =>
+	`loom.chat.catalog.${projectId}`;
 function isCatalog(value: unknown): value is Catalog {
 	if (!value || typeof value !== "object") return false;
 	const catalog = value as Partial<Catalog>;
@@ -177,10 +191,12 @@ export const chat = {
 			return catalog;
 		});
 		catalogRequests.set(projectId, result);
-		void result.finally(() => {
-			if (catalogRequests.get(projectId) === result)
-				catalogRequests.delete(projectId);
-		}).catch(() => {});
+		void result
+			.finally(() => {
+				if (catalogRequests.get(projectId) === result)
+					catalogRequests.delete(projectId);
+			})
+			.catch(() => {});
 		return result;
 	},
 	files: (projectId: string, query: string) =>
@@ -191,6 +207,74 @@ export const chat = {
 		request<{ type: string; content: string; encoding?: string }>(
 			`${root}/file?${new URLSearchParams({ projectId, path })}`,
 		),
+	workspaceTree: (projectId: string, directory = "", workspaceId = "") =>
+		request<{
+			context: {
+				kind: "project";
+				projectId: string;
+				workspaceId: string;
+				label: string;
+			};
+			directory: string;
+			entries: WorkspaceFileEntry[];
+			truncated: boolean;
+		}>(
+			`${root}/workspace/tree?${new URLSearchParams({ projectId, directory, ...(workspaceId ? { workspaceId } : {}) })}`,
+		),
+	workspaceFile: (projectId: string, path: string, workspaceId: string) =>
+		request<WorkspaceFilePreview>(
+			`${root}/workspace/file?${new URLSearchParams({ projectId, path, workspaceId })}`,
+		),
+	saveWorkspaceFile: (
+		projectId: string,
+		workspaceId: string,
+		path: string,
+		content: string,
+		expectedRevision: string,
+		requestId: string,
+	) =>
+		request<{ path: string; byteSize: number; revision: string }>(
+			`${root}/workspace/file`,
+			{
+				method: "PUT",
+				body: JSON.stringify({
+					projectId,
+					workspaceId,
+					path,
+					content,
+					expectedRevision,
+					requestId,
+				}),
+			},
+		),
+	createWorkspaceFile: (
+		projectId: string,
+		workspaceId: string,
+		parent: string,
+		name: string,
+		requestId: string,
+	) =>
+		post<{ path: string; type: "file" }>("/workspace/file", {
+			projectId,
+			workspaceId,
+			parent,
+			name,
+			requestId,
+		}),
+	createWorkspaceDirectory: (
+		projectId: string,
+		workspaceId: string,
+		parent: string,
+		name: string,
+		requestId: string,
+	) =>
+		post<{ path: string; type: "directory" }>("/workspace/directory", {
+			projectId,
+			workspaceId,
+			parent,
+			name,
+			requestId,
+		}),
 	permission: (
 		id: string,
 		requestId: string,

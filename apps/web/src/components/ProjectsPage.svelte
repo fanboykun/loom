@@ -7,6 +7,7 @@ import {
 	FileCode,
 	FileDiff as FileDiffIcon,
 	Folder,
+	FolderOpen,
 	FolderPlus,
 	Gauge,
 	GitBranch,
@@ -64,6 +65,7 @@ import Composer from "./chat/Composer.svelte";
 import QuestionCard from "./chat/QuestionCard.svelte";
 import Turn from "./chat/Turn.svelte";
 import KanbanBoard from "./KanbanBoard.svelte";
+import WorkspaceCodePreview from "./WorkspaceCodePreview.svelte";
 
 let projects = $state<Project[]>([]);
 let sessions = $state<ChatSession[]>([]);
@@ -126,12 +128,15 @@ let fileName = $state("");
 let fileContent = $state("");
 let diffs = $state<FileDiff[]>([]);
 type ChatPanel =
+	| "files"
 	| "context"
 	| "git"
 	| "pull-requests"
 	| "changes"
 	| "walkthrough";
 let activePanel = $state<ChatPanel | null>(null);
+let previewExpanded = $state(false);
+let previewHasUnsavedChanges = $state(false);
 let gitOverview = $state<ProjectGitOverview | null>(null);
 let pullRequestData = $state<ProjectPullRequests | null>(null);
 let walkthroughSnapshot = $state<WalkthroughSnapshot | null>(null);
@@ -531,6 +536,10 @@ async function refreshSession(id: string) {
 	return result;
 }
 async function selectSession(id: string) {
+	if (previewHasUnsavedChanges && id !== sessionId) {
+		toast.error("Save or discard file edits before switching sessions.");
+		return;
+	}
 	panelRequest += 1;
 	sessionId = id;
 	conversation = null;
@@ -723,6 +732,10 @@ async function openSession(id: string) {
 	await goto(homeUrl(id));
 }
 async function newSession(projectId = selectedProjectId) {
+	if (previewHasUnsavedChanges && projectId !== selectedProjectId) {
+		toast.error("Save or discard file edits before switching projects.");
+		return;
+	}
 	selectedProjectId = projectId;
 	draft = "";
 	model = preferredModel(projectId);
@@ -734,6 +747,10 @@ async function newSession(projectId = selectedProjectId) {
 	await goto(homeUrl());
 }
 async function showPanel(panel: ChatPanel, force = false) {
+	if (activePanel === "files" && previewHasUnsavedChanges) {
+		toast.error("Save or discard file edits before leaving the file preview.");
+		return;
+	}
 	if (activePanel === panel && !force) {
 		activePanel = null;
 		panelRequest += 1;
@@ -746,7 +763,7 @@ async function showPanel(panel: ChatPanel, force = false) {
 	const projectId = selectedProjectId;
 	const currentSession = sessionId;
 	panelLoading = false;
-	if (panel === "context") return;
+	if (panel === "context" || panel === "files") return;
 	if (
 		(panel === "git" || panel === "pull-requests" || panel === "walkthrough") &&
 		!projectId
@@ -1126,7 +1143,7 @@ async function answer(requestId: string, answers: string[][]) {
     {:else}
     {#if noModels}<div role="alert" class="flex shrink-0 flex-wrap items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-5 py-3 text-sm text-amber-200"><TriangleAlert size={16} class="shrink-0 text-amber-300" /><p class="min-w-0 flex-1">Connected, but no models are configured in OpenCode. Add a provider (for example, run <code class="rounded bg-black/30 px-1 py-0.5 text-xs">opencode auth login</code>), then restart the daemon.</p><Button variant="outline" size="sm" onclick={reloadModels}><RefreshCw size={13} />Reload models</Button></div>{/if}
     <div class="flex min-h-0 flex-1">
-    <div class="flex min-w-0 flex-1 flex-col">
+	<div class={`flex min-w-0 flex-1 flex-col ${activePanel === "files" && previewExpanded ? "hidden" : ""}`}>
     <div bind:this={scroller} onscroll={(event) => { const node = event.currentTarget; follow = node.scrollHeight - node.scrollTop - node.clientHeight < 100; }} class="nice-scroll min-h-0 flex-1 overflow-y-auto">
       <div class={`mx-auto flex min-h-full w-full max-w-[740px] flex-col px-5 ${sessionId ? "py-8" : "justify-center py-12"}`}>
         {#if loading || sessionLoading}<div role="status" class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"><LoaderCircle size={17} class="animate-spin" />Loading {loading ? "workspace" : "conversation"}…</div>
@@ -1149,7 +1166,10 @@ async function answer(requestId: string, answers: string[][]) {
     {#if sessionId && viewMode === "chat"}<div class="shrink-0 border-t bg-background px-5 py-4"><div class="mx-auto max-w-3xl"><Composer projectId={selectedProjectId} {catalog} {customAgents} {busy} disabled={!conversation || sessionLoading} onsend={send} onstop={stop} bind:draft bind:model bind:agent bind:customAgentId autoAccept={selectedProject?.autoAccept ?? false} onAutoAcceptChange={selectedProject ? (value) => void setAutoAccept(value) : undefined} /></div></div>{/if}
     </div>
     {#if activePanel}
-      <aside class={activePanel === "walkthrough" ? "flex w-[min(850px,76vw)] shrink-0 flex-col border-l bg-card/30" : "flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]"} aria-label={`${activePanel} panel`}>
+      <aside class={activePanel === "files" ? (previewExpanded ? "relative flex min-w-0 flex-1 flex-col border-l bg-card/30" : "relative flex w-[min(900px,76vw)] min-w-0 shrink-0 flex-col border-l bg-card/30") : activePanel === "walkthrough" ? "flex w-[min(850px,76vw)] shrink-0 flex-col border-l bg-card/30" : "flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]"} aria-label={`${activePanel} panel`}>
+        {#if activePanel === "files"}
+          {#key selectedProjectId}<WorkspaceCodePreview projectId={selectedProjectId} projectName={selectedProject?.name ?? "Project"} {busy} bind:hasUnsavedChanges={previewHasUnsavedChanges} bind:expanded={previewExpanded} onclose={() => { previewExpanded = false; activePanel = null; }} />{/key}
+        {:else}
         <div class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
           <p class="min-w-0 flex-1 truncate text-sm font-medium">{activePanel === "context" ? "Context usage" : activePanel === "git" ? "Git" : activePanel === "pull-requests" ? "Pull requests" : activePanel === "walkthrough" ? "Walkthrough" : "Changes"}</p>
           {#if activePanel !== "context"}<Button variant="ghost" size="icon" class="size-7" aria-label="Refresh panel" title="Refresh" onclick={() => void showPanel(activePanel!, true)} disabled={panelLoading}><RefreshCw size={13} class={panelLoading ? "animate-spin" : ""} /></Button>{/if}
@@ -1260,9 +1280,11 @@ async function answer(requestId: string, answers: string[][]) {
             </section>
           {/if}
         </div>
+        {/if}
       </aside>
     {/if}
     <nav class="flex w-11 shrink-0 flex-col items-center gap-1 border-l bg-card/20 py-2" aria-label="Chat tools">
+      <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "files" ? "bg-accent text-primary" : "text-muted-foreground"}`} aria-label="Project files" title="Project files" aria-pressed={activePanel === "files"} disabled={!selectedProjectId} onclick={() => void showPanel("files")}><FolderOpen size={16} /></Button>
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "context" ? "text-primary" : "text-muted-foreground"}`} aria-label="Context usage" title="Context usage" aria-pressed={activePanel === "context"} onclick={() => void showPanel("context")}><Gauge size={16} /></Button>
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "git" ? "text-primary" : "text-muted-foreground"}`} aria-label="Git status" title="Git status" aria-pressed={activePanel === "git"} onclick={() => void showPanel("git")}><GitBranch size={16} /></Button>
       <Button variant="ghost" size="icon" class={`size-9 ${activePanel === "pull-requests" ? "text-primary" : "text-muted-foreground"}`} aria-label="Pull requests" title="Pull requests" aria-pressed={activePanel === "pull-requests"} onclick={() => void showPanel("pull-requests")}><GitPullRequest size={16} /></Button>

@@ -1,11 +1,20 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentRuntime, ProviderManager } from "@loom/providers";
+import type { Context } from "hono";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { AgyPermissionStore } from "./permissions";
+import {
+	createWorkspaceDirectory,
+	createWorkspaceFile,
+	listWorkspaceDirectory,
+	readWorkspaceFile,
+	WorkspaceFileError,
+	writeWorkspaceFile,
+} from "./workspace-files";
 
 const id = z.string().regex(/^ses_[\w-]+$/);
 const promptSchema = z
@@ -84,6 +93,7 @@ type ProviderTurn = {
 	runtime: AgentRuntime;
 	id: string;
 	loomSessionId: string;
+	projectId: string;
 	providerId: string;
 	messages: ProviderMessage[];
 	assistant: ProviderMessage;
@@ -221,6 +231,25 @@ export function createChatRoutes(options: {
 }) {
 	const app = new Hono();
 	const providerSessions = new Map<string, ProviderTurn>();
+	const workspaceMutations = new Set<string>();
+	const workspaceEntryReceipts = new Map<
+		string,
+		{
+			projectId: string;
+			signature: string;
+			result: { path: string; type: "file" | "directory" };
+			createdAt: number;
+		}
+	>();
+	const workspaceWriteReceipts = new Map<
+		string,
+		{
+			projectId: string;
+			signature: string;
+			result: { path: string; byteSize: number; revision: string };
+			createdAt: number;
+		}
+	>();
 	const agyEnabled =
 		options.permissions !== undefined && !!options.agyPermissionUrl;
 	async function updateProviderTurn(turn: ProviderTurn) {
@@ -423,6 +452,125 @@ export function createChatRoutes(options: {
 			throw new HTTPException(404, { message: "Choose an existing project" });
 		return project.path;
 	}
+	async function projectWorkspace(
+		projectId: string,
+		expectedWorkspaceId?: string,
+	) {
+		const project = await options.projects.getById(projectId);
+		if (!project)
+			throw new HTTPException(404, { message: "Choose an existing project" });
+		const root = await realpath(project.path);
+		const workspaceId = createHash("sha256")
+			.update(root)
+			.digest("hex")
+			.slice(0, 24);
+		if (expectedWorkspaceId && expectedWorkspaceId !== workspaceId)
+			throw new WorkspaceFileError(
+				"STALE_CONTEXT",
+				"The project checkout changed. Refresh the file preview before continuing.",
+			);
+		return { root, workspaceId };
+	}
+	function workspaceErrorResponse(c: Context, error: unknown) {
+		if (error instanceof WorkspaceFileError) {
+			const status =
+				error.code === "NOT_FOUND"
+					? 404
+					: error.code === "ALREADY_EXISTS"
+						? 409
+						: error.code === "FILE_TOO_LARGE"
+							? 413
+							: error.code === "WORKSPACE_BUSY"
+								? 423
+								: error.code === "FORBIDDEN" ||
+										error.code === "READ_ONLY_CONTEXT"
+									? 403
+									: error.code === "STALE_CONTEXT"
+										? 409
+										: error.code === "STALE_REVISION"
+											? 409
+											: 400;
+			return c.json(
+				{ error: { code: error.code, message: error.message } },
+				status,
+			);
+		}
+		throw error;
+	}
+	async function ensureWorkspaceNotBusy(projectId: string, root: string) {
+		if (
+			[...providerSessions.values()].some(
+				(turn) => turn.projectId === projectId && !turn.finished,
+			)
+		)
+			throw new WorkspaceFileError(
+				"WORKSPACE_BUSY",
+				"Wait for the active chat run to finish before creating workspace entries.",
+			);
+		try {
+			const [sessions, statuses] = await Promise.all([
+				request<Session[]>("/session?limit=200", root),
+				request<Record<string, { type?: string }>>("/session/status", root),
+			]);
+			const active = sessions.some(
+				(session) =>
+					resolve(session.directory) === resolve(root) &&
+					statuses[session.id]?.type !== undefined &&
+					statuses[session.id]?.type !== "idle",
+			);
+			if (active)
+				throw new WorkspaceFileError(
+					"WORKSPACE_BUSY",
+					"Wait for the active chat run to finish before creating workspace entries.",
+				);
+		} catch (error) {
+			if (error instanceof WorkspaceFileError) throw error;
+			throw new WorkspaceFileError(
+				"WORKSPACE_BUSY",
+				"Loom could not verify that the project is idle. Retry when OpenCode is connected.",
+			);
+		}
+	}
+	function mutationReceipt(
+		projectId: string,
+		requestId: string,
+		signature: string,
+	) {
+		for (const [id, receipt] of workspaceEntryReceipts) {
+			if (Date.now() - receipt.createdAt > 60 * 60_000)
+				workspaceEntryReceipts.delete(id);
+		}
+		const previous = workspaceEntryReceipts.get(requestId);
+		if (
+			previous &&
+			(previous.projectId !== projectId || previous.signature !== signature)
+		)
+			throw new WorkspaceFileError(
+				"INVALID_NAME",
+				"This creation request ID was already used for a different entry.",
+			);
+		return previous?.result;
+	}
+	function writeMutationReceipt(
+		projectId: string,
+		requestId: string,
+		signature: string,
+	) {
+		for (const [id, receipt] of workspaceWriteReceipts) {
+			if (Date.now() - receipt.createdAt > 60 * 60_000)
+				workspaceWriteReceipts.delete(id);
+		}
+		const previous = workspaceWriteReceipts.get(requestId);
+		if (
+			previous &&
+			(previous.projectId !== projectId || previous.signature !== signature)
+		)
+			throw new WorkspaceFileError(
+				"INVALID_NAME",
+				"This save request ID was already used for different file content.",
+			);
+		return previous?.result;
+	}
 	async function session(sessionId: string) {
 		id.parse(sessionId);
 		const scope = await options.sessionScope?.(sessionId);
@@ -482,6 +630,199 @@ export function createChatRoutes(options: {
 			});
 		return local;
 	}
+	app.get("/workspace/tree", async (c) => {
+		try {
+			const projectId = z
+				.string()
+				.min(1)
+				.max(100)
+				.parse(c.req.query("projectId"));
+			const directory = z
+				.string()
+				.max(2000)
+				.default("")
+				.parse(c.req.query("directory") ?? "");
+			const { root, workspaceId } = await projectWorkspace(
+				projectId,
+				c.req.query("workspaceId"),
+			);
+			return c.json({
+				context: {
+					kind: "project",
+					projectId,
+					workspaceId,
+					label: "Project checkout",
+				},
+				...(await listWorkspaceDirectory(root, directory)),
+			});
+		} catch (error) {
+			return workspaceErrorResponse(c, error);
+		}
+	});
+	app.get("/workspace/file", async (c) => {
+		try {
+			const projectId = z
+				.string()
+				.min(1)
+				.max(100)
+				.parse(c.req.query("projectId"));
+			const path = z.string().min(1).max(2000).parse(c.req.query("path"));
+			const workspaceId = z
+				.string()
+				.min(1)
+				.max(100)
+				.parse(c.req.query("workspaceId"));
+			return c.json(
+				await readWorkspaceFile(
+					(await projectWorkspace(projectId, workspaceId)).root,
+					path,
+				),
+			);
+		} catch (error) {
+			return workspaceErrorResponse(c, error);
+		}
+	});
+	app.put("/workspace/file", async (c) => {
+		try {
+			const input = z
+				.object({
+					projectId: z.string().min(1).max(100),
+					workspaceId: z.string().min(1).max(100),
+					path: z.string().min(1).max(2000),
+					content: z.string().max(512 * 1024),
+					expectedRevision: z.string().regex(/^[a-f0-9]{64}$/i),
+					requestId: z.string().uuid(),
+				})
+				.parse(await c.req.json());
+			const signature = JSON.stringify({
+				projectId: input.projectId,
+				workspaceId: input.workspaceId,
+				path: input.path,
+				contentHash: createHash("sha256").update(input.content).digest("hex"),
+				expectedRevision: input.expectedRevision,
+			});
+			const previous = writeMutationReceipt(
+				input.projectId,
+				input.requestId,
+				signature,
+			);
+			if (previous) return c.json(previous);
+			if (workspaceMutations.has(input.projectId))
+				throw new WorkspaceFileError(
+					"WORKSPACE_BUSY",
+					"Another workspace change is being saved. Try again shortly.",
+				);
+			workspaceMutations.add(input.projectId);
+			try {
+				const { root } = await projectWorkspace(
+					input.projectId,
+					input.workspaceId,
+				);
+				await ensureWorkspaceNotBusy(input.projectId, root);
+				const result = await writeWorkspaceFile(
+					root,
+					input.path,
+					input.content,
+					input.expectedRevision,
+				);
+				workspaceWriteReceipts.set(input.requestId, {
+					projectId: input.projectId,
+					signature,
+					result,
+					createdAt: Date.now(),
+				});
+				return c.json(result);
+			} finally {
+				workspaceMutations.delete(input.projectId);
+			}
+		} catch (error) {
+			return workspaceErrorResponse(c, error);
+		}
+	});
+	const createWorkspaceEntry = async (
+		projectId: string,
+		workspaceId: string,
+		parent: string,
+		name: string,
+		requestId: string,
+		type: "file" | "directory",
+	) => {
+		const signature = JSON.stringify({
+			projectId,
+			workspaceId,
+			parent,
+			name,
+			type,
+		});
+		const previous = mutationReceipt(projectId, requestId, signature);
+		if (previous) return previous;
+		if (workspaceMutations.has(projectId))
+			throw new WorkspaceFileError(
+				"WORKSPACE_BUSY",
+				"Another workspace entry is being created. Try again shortly.",
+			);
+		workspaceMutations.add(projectId);
+		try {
+			const { root } = await projectWorkspace(projectId, workspaceId);
+			await ensureWorkspaceNotBusy(projectId, root);
+			const result =
+				type === "file"
+					? await createWorkspaceFile(root, parent, name)
+					: await createWorkspaceDirectory(root, parent, name);
+			workspaceEntryReceipts.set(requestId, {
+				projectId,
+				signature,
+				result,
+				createdAt: Date.now(),
+			});
+			return result;
+		} finally {
+			workspaceMutations.delete(projectId);
+		}
+	};
+	const createWorkspaceEntrySchema = z.object({
+		projectId: z.string().min(1).max(100),
+		workspaceId: z.string().min(1).max(100),
+		parent: z.string().max(2000).default(""),
+		name: z.string().min(1).max(255),
+		requestId: z.string().uuid(),
+	});
+	app.post("/workspace/file", async (c) => {
+		try {
+			const input = createWorkspaceEntrySchema.parse(await c.req.json());
+			return c.json(
+				await createWorkspaceEntry(
+					input.projectId,
+					input.workspaceId,
+					input.parent,
+					input.name,
+					input.requestId,
+					"file",
+				),
+				201,
+			);
+		} catch (error) {
+			return workspaceErrorResponse(c, error);
+		}
+	});
+	app.post("/workspace/directory", async (c) => {
+		try {
+			const input = createWorkspaceEntrySchema.parse(await c.req.json());
+			return c.json(
+				await createWorkspaceEntry(
+					input.projectId,
+					input.workspaceId,
+					input.parent,
+					input.name,
+					input.requestId,
+					"directory",
+				),
+				201,
+			);
+		} catch (error) {
+			return workspaceErrorResponse(c, error);
+		}
+	});
 	app.get("/sessions", async (c) => {
 		const root = await directory(c.req.query("projectId"));
 		const sessions = await request<Session[]>("/session?limit=200", root);
@@ -828,6 +1169,7 @@ export function createChatRoutes(options: {
 				runtime,
 				id: created.id,
 				loomSessionId: current.id,
+				projectId: current.projectId ?? "",
 				providerId,
 				messages: [...history, user, assistant],
 				assistant,
@@ -893,9 +1235,9 @@ export function createChatRoutes(options: {
 					...(customAgent
 						? {
 								permission: {
-						mode: customAgentCanWriteFiles
-							? ("ask" as const)
-							: ("read-only" as const),
+									mode: customAgentCanWriteFiles
+										? ("ask" as const)
+										: ("read-only" as const),
 									...(permissionToken && options.agyPermissionUrl
 										? {
 												env: {
@@ -958,11 +1300,11 @@ export function createChatRoutes(options: {
 			parts: [
 				...(input.text ? [{ type: "text", text: input.text }] : []),
 				...designNodes.map((node) => ({
-						type: "file",
-						mime: "text/html",
-						filename: `canvas-design:${node.id}.html`,
-						url: `data:text/html;base64,${Buffer.from(node.html).toString("base64")}`,
-					})),
+					type: "file",
+					mime: "text/html",
+					filename: `canvas-design:${node.id}.html`,
+					url: `data:text/html;base64,${Buffer.from(node.html).toString("base64")}`,
+				})),
 				...files,
 				...input.attachments.map((attachment) => ({
 					type: "file",
