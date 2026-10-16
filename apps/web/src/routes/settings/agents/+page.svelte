@@ -198,7 +198,10 @@ function modelDisplayName(providerId: string, modelId: string | null) {
 	return match?.displayName ?? unprefixedId;
 }
 function providerDisplayName(providerId: string) {
-	return providers.find((provider) => provider.providerId === providerId)?.name ?? providerId;
+	return (
+		providers.find((provider) => provider.providerId === providerId)?.name ??
+		providerId
+	);
 }
 const visibleAgents = $derived(
 	agents.filter((a) =>
@@ -238,7 +241,9 @@ onMount(async () => {
 });
 
 async function reload() {
-	agents = (await daemon.listCustomAgents(projectId || undefined)) as unknown as Agent[];
+	agents = (await daemon.listCustomAgents(
+		projectId || undefined,
+	)) as unknown as Agent[];
 }
 function resetForm() {
 	editingId = "";
@@ -393,8 +398,7 @@ async function saveAgent() {
 		!selectedProvider ||
 		!skills.some((s) => s.enabled)
 	) {
-		error =
-			"Isi label dan provider, lalu aktifkan minimal satu skill.";
+		error = "Isi label dan provider, lalu aktifkan minimal satu skill.";
 		return;
 	}
 	if (

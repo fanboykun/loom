@@ -32,8 +32,20 @@ export type McpInventory = {
 	projectName: string | null;
 	generatedAt: string;
 	connectionStatus: "not-observed";
-	coverage: { maxConfigBytes: number; maxServersPerSource: number; maxServers: number; truncated: boolean };
-	sources: Array<{ id: string; runtime: string; scope: string; file: string; status: string; issue?: string }>;
+	coverage: {
+		maxConfigBytes: number;
+		maxServersPerSource: number;
+		maxServers: number;
+		truncated: boolean;
+	};
+	sources: Array<{
+		id: string;
+		runtime: string;
+		scope: string;
+		file: string;
+		status: string;
+		issue?: string;
+	}>;
 	servers: Array<{
 		id: string;
 		name: string;
@@ -88,14 +100,41 @@ export type NativeContextSkill = {
 
 export type ContextSkillDiscovery = {
 	projectId: string | null;
-	coverage: { maxDirectoriesPerSource: number; maxDiscoveredSkills: number; maxSkillBytes: number; truncatedSources: number };
-	sources: Array<{ id: string; label: string; runtimeId: string; scope: string; status: string; issue?: string; truncated?: boolean }>;
+	coverage: {
+		maxDirectoriesPerSource: number;
+		maxDiscoveredSkills: number;
+		maxSkillBytes: number;
+		truncatedSources: number;
+	};
+	sources: Array<{
+		id: string;
+		label: string;
+		runtimeId: string;
+		scope: string;
+		status: string;
+		issue?: string;
+		truncated?: boolean;
+	}>;
 	skills: NativeContextSkill[];
 };
 
 export type ContextMemoryHistory = {
-	decisions: Array<{ id: string; version: number; proposedBy: string; decidedBy: string | null; decision: string; createdAt: string }>;
-	evidence: Array<{ id: string; sourceType: string; sourceId: string; sourceHash: string | null; verificationStatus: string; createdAt: string }>;
+	decisions: Array<{
+		id: string;
+		version: number;
+		proposedBy: string;
+		decidedBy: string | null;
+		decision: string;
+		createdAt: string;
+	}>;
+	evidence: Array<{
+		id: string;
+		sourceType: string;
+		sourceId: string;
+		sourceHash: string | null;
+		verificationStatus: string;
+		createdAt: string;
+	}>;
 };
 
 export type ProjectGitOverview = {
@@ -380,7 +419,9 @@ export async function request<T>(path: string, init: RequestInit = {}) {
 export const daemon = {
 	listProjects: () => request<Project[]>("/api/projects"),
 	getMcpInventory: (projectId?: string) =>
-		request<McpInventory>(`/api/mcp/inventory${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
+		request<McpInventory>(
+			`/api/mcp/inventory${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+		),
 	getProject: (id: string) => request<Project>(`/api/projects/${id}`),
 	getProjectGit: (id: string) =>
 		request<ProjectGitOverview>(`/api/projects/${id}/git`),
@@ -551,11 +592,20 @@ export const daemon = {
 			method: "DELETE",
 		}),
 	listContextVersions: (id: string) =>
-		request<Array<{ id: string; version: number; content: string; contentHash: string; metadata: string; createdAt: string }>>(
-			`/api/context/entries/${encodeURIComponent(id)}/versions`,
-		),
+		request<
+			Array<{
+				id: string;
+				version: number;
+				content: string;
+				contentHash: string;
+				metadata: string;
+				createdAt: string;
+			}>
+		>(`/api/context/entries/${encodeURIComponent(id)}/versions`),
 	getContextMemoryHistory: (id: string) =>
-		request<ContextMemoryHistory>(`/api/context/entries/${encodeURIComponent(id)}/memory-history`),
+		request<ContextMemoryHistory>(
+			`/api/context/entries/${encodeURIComponent(id)}/memory-history`,
+		),
 	getAgentPromptPresets: () =>
 		request<Record<string, string>>("/api/agents/prompt-presets"),
 	createCustomAgent: (input: Record<string, unknown>) =>

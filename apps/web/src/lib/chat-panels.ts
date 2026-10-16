@@ -124,13 +124,22 @@ export function defaultRailPanelPreferences(): RailPanelPreferences {
 	return { version: 1, visibilityOverrides: {} };
 }
 
-export function parseRailPanelPreferences(raw: string | null): RailPanelPreferences {
+export function parseRailPanelPreferences(
+	raw: string | null,
+): RailPanelPreferences {
 	if (!raw) return defaultRailPanelPreferences();
 	try {
 		const value: unknown = JSON.parse(raw);
-		if (!value || typeof value !== "object" || (value as { version?: unknown }).version !== 1) return defaultRailPanelPreferences();
-		const input = (value as { visibilityOverrides?: unknown }).visibilityOverrides;
-		if (!input || typeof input !== "object" || Array.isArray(input)) return defaultRailPanelPreferences();
+		if (
+			!value ||
+			typeof value !== "object" ||
+			(value as { version?: unknown }).version !== 1
+		)
+			return defaultRailPanelPreferences();
+		const input = (value as { visibilityOverrides?: unknown })
+			.visibilityOverrides;
+		if (!input || typeof input !== "object" || Array.isArray(input))
+			return defaultRailPanelPreferences();
 		const visibilityOverrides: RailPanelPreferences["visibilityOverrides"] = {};
 		for (const panel of chatPanelRegistry) {
 			if (!panel.configurable) continue;
@@ -143,7 +152,10 @@ export function parseRailPanelPreferences(raw: string | null): RailPanelPreferen
 	}
 }
 
-export function isChatPanelVisible(panel: ChatPanelDefinition, preferences: RailPanelPreferences) {
+export function isChatPanelVisible(
+	panel: ChatPanelDefinition,
+	preferences: RailPanelPreferences,
+) {
 	if (!panel.configurable) return panel.defaultVisible;
 	return preferences.visibilityOverrides[panel.id] ?? panel.defaultVisible;
 }

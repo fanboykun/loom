@@ -12,18 +12,19 @@ import {
 	FolderPlus,
 	GitBranch,
 	GitPullRequest,
-	ListTree,
 	ListTodo,
+	ListTree,
 	LoaderCircle,
 	MessageSquare,
 	MessageSquarePlus,
 	PanelLeft,
 	Pencil,
+	Plus,
 	RefreshCw,
 	Search,
 	Settings,
-	SlidersHorizontal,
 	ShieldCheck,
+	SlidersHorizontal,
 	Sparkles,
 	Star,
 	Trash2,
@@ -42,6 +43,16 @@ import {
 	chat,
 	type FileDiff,
 } from "$lib/chat";
+import {
+	type ChatPanelId,
+	chatPanelRegistry,
+	defaultRailPanelPreferences,
+	isChatPanelVisible,
+	parseRailPanelPreferences,
+	type RailPanelPreferences,
+	railPanelPreferencesKey,
+	withChatPanelVisibility,
+} from "$lib/chat-panels";
 import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
 import { Badge } from "$lib/components/ui/badge";
 import { Button, buttonVariants } from "$lib/components/ui/button";
@@ -54,22 +65,12 @@ import * as Popover from "$lib/components/ui/popover";
 import * as Select from "$lib/components/ui/select";
 import * as Tabs from "$lib/components/ui/tabs";
 import {
-	chatPanelRegistry,
-	isChatPanelVisible,
-	parseRailPanelPreferences,
-	railPanelPreferencesKey,
-	defaultRailPanelPreferences,
-	withChatPanelVisibility,
-	type ChatPanelId,
-	type RailPanelPreferences,
-} from "$lib/chat-panels";
-import {
+	type CustomAgentMonitorItem,
+	type CustomAgentRunMonitorItem,
 	daemon,
 	type Project,
 	type ProjectGitOverview,
 	type ProjectPullRequests,
-	type CustomAgentMonitorItem,
-	type CustomAgentRunMonitorItem,
 	type Task,
 	type WalkthroughDocument,
 	type WalkthroughLanguage,
@@ -78,10 +79,11 @@ import {
 import AddProjectForm from "./AddProjectForm.svelte";
 import Composer from "./chat/Composer.svelte";
 import QuestionCard from "./chat/QuestionCard.svelte";
+import SplitChatWorkspace from "./chat/SplitChatWorkspace.svelte";
 import Turn from "./chat/Turn.svelte";
 import KanbanBoard from "./KanbanBoard.svelte";
-import WorkspaceCodePreview from "./WorkspaceCodePreview.svelte";
 import TerminalPanel from "./TerminalPanel.svelte";
+import WorkspaceCodePreview from "./WorkspaceCodePreview.svelte";
 
 let projects = $state<Project[]>([]);
 let sessions = $state<ChatSession[]>([]);
@@ -112,10 +114,26 @@ let renameTarget = $state("");
 let deleteTarget = $state<ChatSession | null>(null);
 let deleteSessionOpen = $state(false);
 type ViewMode = "chat" | "kanban";
+type WorkspaceChatTab = {
+	id: string;
+	sessionId: string;
+	projectId: string;
+	label: string;
+	draft: string;
+	model: string;
+	agent: string;
+	customAgentId: string;
+};
 function initialView(): ViewMode {
 	return page.url.searchParams.get("view") === "kanban" ? "kanban" : "chat";
 }
 let viewMode = $state<ViewMode>(initialView());
+let splitChat = $state(false);
+let splitPreviousPanel = $state<ChatPanelId | null>(null);
+let chatTabs = $state<WorkspaceChatTab[]>([
+	{ id: "chat-tab-1", sessionId: "", projectId: "", label: "New chat", draft: "", model: "", agent: "build", customAgentId: "" },
+]);
+let activeChatTabId = $state("chat-tab-1");
 let draft = $state("");
 let model = $state("");
 let agent = $state("build");
@@ -149,7 +167,9 @@ let fileName = $state("");
 let fileContent = $state("");
 let diffs = $state<FileDiff[]>([]);
 let activePanel = $state<ChatPanelId | null>("agents");
-let panelPreferences = $state<RailPanelPreferences>(defaultRailPanelPreferences());
+let panelPreferences = $state<RailPanelPreferences>(
+	defaultRailPanelPreferences(),
+);
 let panelPreferencesReady = $state(false);
 let panelPreferencesSaveError = $state(false);
 let configurePanelsOpen = $state(false);
@@ -200,17 +220,22 @@ let disposed = false;
 let timer: ReturnType<typeof setTimeout>;
 let projectRequest = 0;
 let fileRequest = 0;
-let sending = $state(false);
+let sendingChatTabIds = $state<string[]>([]);
+const sending = $derived(sendingChatTabIds.includes(activeChatTabId));
 let permissionReplying = $state<string | null>(null);
 const selectedProject = $derived(
 	projects.find((p) => p.id === selectedProjectId),
 );
 const availableChatPanels = $derived(
-	chatPanelRegistry.filter((panel) => panel.isAvailable({ projectId: selectedProjectId })),
+	chatPanelRegistry.filter((panel) =>
+		panel.isAvailable({ projectId: selectedProjectId }),
+	),
 );
 const visibleChatPanels = $derived(
 	panelPreferencesReady
-		? availableChatPanels.filter((panel) => isChatPanelVisible(panel, panelPreferences))
+		? availableChatPanels.filter((panel) =>
+				isChatPanelVisible(panel, panelPreferences),
+			)
 		: [],
 );
 const messages = $derived([
@@ -539,6 +564,7 @@ async function refreshSession(id: string) {
 			p.path.replace(/\/$/, "") === result.session.directory.replace(/\/$/, ""),
 	);
 	if (project) selectedProjectId = project.id;
+	saveActiveChatTab();
 	sessions = [
 		{ ...result.session, projectId: project?.id },
 		...sessions.filter((s) => s.id !== id),
@@ -615,7 +641,34 @@ async function selectSession(id: string) {
 }
 $effect(() => {
 	const id = page.url.searchParams.get("session") ?? "";
-	if (ready && id !== sessionId) void selectSession(id);
+	if (ready && id !== sessionId) {
+		if (id) {
+			let tab = chatTabs.find((item) => item.sessionId === id);
+			if (!tab) {
+				saveActiveChatTab();
+				const existing = sessions.find((item) => item.id === id);
+				tab = {
+					id: `chat-tab-${crypto.randomUUID()}`,
+					sessionId: id,
+					projectId: existing?.projectId ?? selectedProjectId,
+					label: existing?.title ?? "Chat",
+					draft: "",
+					model: preferredModel(existing?.projectId ?? selectedProjectId),
+					agent: "build",
+					customAgentId: "",
+				};
+				chatTabs = [...chatTabs, tab];
+			}
+			activeChatTabId = tab.id;
+		} else {
+			const tab = chatTabs.find((item) => item.id === activeChatTabId);
+			if (tab && tab.sessionId === sessionId) {
+				tab.sessionId = "";
+				tab.label = "New chat";
+			}
+		}
+		void selectSession(id);
+	}
 });
 $effect(() => {
 	if (viewMode !== "chat" && ready) void refreshBoard();
@@ -695,20 +748,43 @@ const noModels = $derived(
 		!!selectedProjectId &&
 		catalog.models.length === 0,
 );
-const agentMonitorRows = $derived.by(() => monitorAgents.map((agent) => {
-	const run = monitorRuns
-		.filter((item) => item.agentId === agent.id && (item.status === "queued" || item.status === "running"))
-		.sort((a, b) => monitorTimestamp(b.startedAt ?? b.createdAt) - monitorTimestamp(a.startedAt ?? a.createdAt))[0];
-	const task = run?.taskId ? legacyTasks.find((item) => item.id === run.taskId) : undefined;
-	return { agent, run, task };
-}));
-const monitorRunningCount = $derived(agentMonitorRows.filter(({ run }) => run?.status === "running").length);
-const monitorIdleCount = $derived(agentMonitorRows.filter(({ run, agent }) => agent.status === "active" && !run).length);
-const visibleMonitorTasks = $derived(legacyTasks
-	.filter((task) => !selectedProjectId || task.projectId === selectedProjectId)
-	.slice()
-	.sort((a, b) => monitorTimestamp(b.createdAt) - monitorTimestamp(a.createdAt))
-	.slice(0, 8));
+const agentMonitorRows = $derived.by(() =>
+	monitorAgents.map((agent) => {
+		const run = monitorRuns
+			.filter(
+				(item) =>
+					item.agentId === agent.id &&
+					(item.status === "queued" || item.status === "running"),
+			)
+			.sort(
+				(a, b) =>
+					monitorTimestamp(b.startedAt ?? b.createdAt) -
+					monitorTimestamp(a.startedAt ?? a.createdAt),
+			)[0];
+		const task = run?.taskId
+			? legacyTasks.find((item) => item.id === run.taskId)
+			: undefined;
+		return { agent, run, task };
+	}),
+);
+const monitorRunningCount = $derived(
+	agentMonitorRows.filter(({ run }) => run?.status === "running").length,
+);
+const monitorIdleCount = $derived(
+	agentMonitorRows.filter(({ run, agent }) => agent.status === "active" && !run)
+		.length,
+);
+const visibleMonitorTasks = $derived(
+	legacyTasks
+		.filter(
+			(task) => !selectedProjectId || task.projectId === selectedProjectId,
+		)
+		.slice()
+		.sort(
+			(a, b) => monitorTimestamp(b.createdAt) - monitorTimestamp(a.createdAt),
+		)
+		.slice(0, 8),
+);
 function monitorTimestamp(value: string | number | null | undefined) {
 	if (typeof value === "number") return value;
 	if (!value) return 0;
@@ -741,20 +817,30 @@ async function refreshAgentMonitor() {
 			daemon.listCustomAgentRuns(projectId || undefined),
 			daemon.listTasks(),
 		]);
-		if (disposed || request !== monitorRequest || projectId !== selectedProjectId) return;
+		if (
+			disposed ||
+			request !== monitorRequest ||
+			projectId !== selectedProjectId
+		)
+			return;
 		monitorAgents = agents;
 		monitorRuns = runs;
 		legacyTasks = tasks;
 		monitorError = "";
 	} catch (reason) {
 		if (!disposed && request === monitorRequest)
-			monitorError = reason instanceof Error ? reason.message : "Unable to load agent activity.";
+			monitorError =
+				reason instanceof Error
+					? reason.message
+					: "Unable to load agent activity.";
 	}
 }
 onMount(() => {
 	sidebarOpen = window.innerWidth >= 768;
 	try {
-		panelPreferences = parseRailPanelPreferences(window.localStorage.getItem(railPanelPreferencesKey));
+		panelPreferences = parseRailPanelPreferences(
+			window.localStorage.getItem(railPanelPreferencesKey),
+		);
 	} catch {
 		panelPreferences = defaultRailPanelPreferences();
 		panelPreferencesSaveError = true;
@@ -765,7 +851,9 @@ onMount(() => {
 		activePanel = null;
 	const syncPanelPreferences = (event: StorageEvent) => {
 		if (event.key !== railPanelPreferencesKey && event.key !== null) return;
-		panelPreferences = parseRailPanelPreferences(event.key === null ? null : event.newValue);
+		panelPreferences = parseRailPanelPreferences(
+			event.key === null ? null : event.newValue,
+		);
 		panelPreferencesSaveError = false;
 	};
 	window.addEventListener("storage", syncPanelPreferences);
@@ -789,6 +877,7 @@ onMount(() => {
 			}
 			ready = true;
 			await selectSession(page.url.searchParams.get("session") ?? "");
+			saveActiveChatTab();
 		} catch (reason) {
 			report(reason);
 			ready = true;
@@ -813,25 +902,172 @@ function homeUrl(session = "") {
 	const query = params.toString();
 	return `/${query ? `?${query}` : ""}`;
 }
-async function openSession(id: string) {
-	draft = "";
-	if (window.innerWidth < 768) sidebarOpen = false;
-	await goto(homeUrl(id));
+function saveActiveChatTab() {
+	const tab = chatTabs.find((item) => item.id === activeChatTabId);
+	if (!tab) return;
+	tab.sessionId = sessionId;
+	tab.projectId = selectedProjectId;
+	tab.draft = draft;
+	tab.model = model;
+	tab.agent = agent;
+	tab.customAgentId = customAgentId;
+	if (conversation?.session.title) tab.label = conversation.session.title;
 }
-async function newSession(projectId = selectedProjectId) {
+function newChatTab(projectId = selectedProjectId) {
 	if (previewHasUnsavedChanges && projectId !== selectedProjectId) {
 		toast.error("Save or discard file edits before switching projects.");
 		return;
 	}
+	saveActiveChatTab();
+	const tab: WorkspaceChatTab = {
+		id: `chat-tab-${crypto.randomUUID()}`,
+		sessionId: "",
+		projectId,
+		label: "New chat",
+		draft: "",
+		model: preferredModel(projectId),
+		agent: "build",
+		customAgentId: "",
+	};
+	chatTabs = [...chatTabs, tab];
+	activeChatTabId = tab.id;
 	selectedProjectId = projectId;
-	draft = "";
-	model = preferredModel(projectId);
 	sessionId = "";
 	conversation = null;
 	optimistic = null;
 	diffs = [];
+	draft = "";
+	model = tab.model;
+	agent = tab.agent;
+	customAgentId = "";
 	sessionLoading = false;
-	await goto(homeUrl());
+	error = "";
+	if (window.innerWidth < 768) sidebarOpen = false;
+	void goto(homeUrl());
+}
+async function switchChatTab(id: string) {
+	const next = chatTabs.find((item) => item.id === id);
+	if (!next || id === activeChatTabId) return;
+	if (previewHasUnsavedChanges) {
+		toast.error("Save or discard file edits before switching chat tabs.");
+		return;
+	}
+	saveActiveChatTab();
+	activeChatTabId = next.id;
+	selectedProjectId = next.projectId;
+	draft = next.draft;
+	model = next.model || preferredModel(next.projectId);
+	agent = next.agent;
+	customAgentId = next.customAgentId;
+	await goto(homeUrl(next.sessionId), { replaceState: true });
+	await selectSession(next.sessionId);
+	saveActiveChatTab();
+}
+async function closeChatTab(id: string) {
+	const index = chatTabs.findIndex((item) => item.id === id);
+	if (index < 0) return;
+	const wasActive = id === activeChatTabId;
+	if (wasActive && previewHasUnsavedChanges) {
+		toast.error("Save or discard file edits before closing this chat tab.");
+		return;
+	}
+	chatTabs = chatTabs.filter((item) => item.id !== id);
+	if (!wasActive) return;
+	if (!chatTabs.length) {
+		activeChatTabId = "";
+		newChatTab(selectedProjectId);
+		return;
+	}
+	const next = chatTabs[Math.min(index, chatTabs.length - 1)]!;
+	activeChatTabId = "";
+	await switchChatTab(next.id);
+}
+async function openSession(id: string) {
+	let tab = chatTabs.find((item) => item.sessionId === id);
+	if (!tab) {
+		saveActiveChatTab();
+		const existing = sessions.find((item) => item.id === id);
+		tab = {
+			id: `chat-tab-${crypto.randomUUID()}`,
+			sessionId: id,
+			projectId: existing?.projectId ?? selectedProjectId,
+			label: existing?.title ?? "Chat",
+			draft: "",
+			model: preferredModel(existing?.projectId ?? selectedProjectId),
+			agent: "build",
+			customAgentId: "",
+		};
+		chatTabs = [...chatTabs, tab];
+	}
+	await switchChatTab(tab.id);
+	if (window.innerWidth < 768) sidebarOpen = false;
+}
+async function newSession(projectId = selectedProjectId) {
+	newChatTab(projectId);
+}
+function openSplitChat() {
+	if (previewHasUnsavedChanges) {
+		toast.error("Save or discard file edits before opening split chat.");
+		return;
+	}
+	splitPreviousPanel = activePanel;
+	activePanel = null;
+	splitChat = true;
+}
+function registerSplitSession(session: ChatSession, projectId: string) {
+	sessions = [{ ...session, projectId }, ...sessions.filter((item) => item.id !== session.id)];
+}
+async function leaveSplitChat(state: {
+	sessionId: string;
+	projectId: string;
+	model: string;
+	agent: string;
+	customAgentId: string;
+	draft: string;
+	title: string;
+}) {
+	splitChat = false;
+	activePanel = splitPreviousPanel;
+	splitPreviousPanel = null;
+	if (!state.projectId) return;
+	saveActiveChatTab();
+	let tab = state.sessionId
+		? chatTabs.find((item) => item.sessionId === state.sessionId)
+		: chatTabs.find((item) => item.id === activeChatTabId && !item.sessionId && item.projectId === state.projectId);
+	if (!tab) {
+		tab = {
+			id: `chat-tab-${crypto.randomUUID()}`,
+			sessionId: state.sessionId,
+			projectId: state.projectId,
+			label: state.title || "New chat",
+			draft: state.draft,
+			model: state.model,
+			agent: state.agent,
+			customAgentId: state.customAgentId,
+		};
+		chatTabs = [...chatTabs, tab];
+	} else {
+		tab.sessionId = state.sessionId;
+		tab.projectId = state.projectId;
+		tab.label = state.title || (state.sessionId ? "Chat" : "New chat");
+		tab.draft = state.draft;
+		tab.model = state.model;
+		tab.agent = state.agent;
+		tab.customAgentId = state.customAgentId;
+	}
+	activeChatTabId = tab.id;
+	selectedProjectId = state.projectId;
+	draft = state.draft;
+	model = state.model;
+	agent = state.agent;
+	customAgentId = state.customAgentId;
+	sessionId = "";
+	conversation = null;
+	optimistic = null;
+	error = "";
+	await goto(homeUrl(state.sessionId), { replaceState: true });
+	await selectSession(state.sessionId);
+	saveActiveChatTab();
 }
 async function showPanel(panel: ChatPanelId, force = false) {
 	if (activePanel === "files" && previewHasUnsavedChanges) {
@@ -850,7 +1086,12 @@ async function showPanel(panel: ChatPanelId, force = false) {
 	const projectId = selectedProjectId;
 	const currentSession = sessionId;
 	panelLoading = false;
-	if (panel === "context" || panel === "files" || panel === "terminal" || panel === "agents") {
+	if (
+		panel === "context" ||
+		panel === "files" ||
+		panel === "terminal" ||
+		panel === "agents"
+	) {
 		if (panel === "agents") void refreshAgentMonitor();
 		if (panel === "terminal" && !projectId)
 			panelError = "Choose a project before opening a terminal.";
@@ -906,7 +1147,10 @@ async function showPanel(panel: ChatPanelId, force = false) {
 }
 function saveRailPanelPreferences() {
 	try {
-		window.localStorage.setItem(railPanelPreferencesKey, JSON.stringify(panelPreferences));
+		window.localStorage.setItem(
+			railPanelPreferencesKey,
+			JSON.stringify(panelPreferences),
+		);
 		panelPreferencesSaveError = false;
 	} catch {
 		// Keep the in-memory choice and offer a retry in the dialog.
@@ -925,7 +1169,10 @@ function resetRailPanelPreferences() {
 }
 function openRegisteredPanel(panelId: ChatPanelId) {
 	const panel = chatPanelRegistry.find((item) => item.id === panelId);
-	panel?.open({ projectId: selectedProjectId, openPanel: (id) => void showPanel(id) });
+	panel?.open({
+		projectId: selectedProjectId,
+		openPanel: (id) => void showPanel(id),
+	});
 }
 async function generateWalkthrough() {
 	if (!selectedProjectId || !model || walkthroughGenerating) return;
@@ -987,52 +1234,64 @@ function moveWalkthroughStep(direction: -1 | 1) {
 }
 async function send(input: Parameters<typeof chat.send>[1]) {
 	if (!selectedProjectId || sending) return false;
-	sending = true;
-	error = "";
+	const tabId = activeChatTabId;
+	const projectId = selectedProjectId;
+	sendingChatTabIds = [...sendingChatTabIds, tabId];
+	if (activeChatTabId === tabId) error = "";
 	try {
 		let id = sessionId;
 		if (!id) {
 			const created = await chat.create(
-				selectedProjectId,
+				projectId,
 				input.text.split("\n")[0].slice(0, 80) || "File discussion",
 			);
 			id = created.id;
-			sessionId = id;
-			conversation = {
-				session: created,
-				messages: [],
-				status: { type: "idle" },
-				permissions: [],
-				questions: [],
-			};
-			sessions = [{ ...created, projectId: selectedProjectId }, ...sessions];
-			await goto(homeUrl(id), { replaceState: true });
+			const tab = chatTabs.find((item) => item.id === tabId);
+			if (tab) {
+				tab.sessionId = id;
+				tab.label = created.title;
+			}
+			sessions = [{ ...created, projectId }, ...sessions];
+			if (activeChatTabId === tabId) {
+				sessionId = id;
+				conversation = {
+					session: created,
+					messages: [],
+					status: { type: "idle" },
+					permissions: [],
+					questions: [],
+				};
+				saveActiveChatTab();
+				await goto(homeUrl(id), { replaceState: true });
+			}
 		}
 		await chat.send(id, input);
-		optimistic = {
-			info: {
-				id: `pending-${Date.now()}`,
-				role: "user",
-				time: { created: Date.now() },
-			},
-			parts: [
-				{ id: "pending-text", type: "text", text: input.text },
-				...input.files.map((filename, i) => ({
-					id: `pending-file-${i}`,
-					type: "file",
-					filename,
-				})),
-			],
-		};
-		follow = true;
-		await tick();
-		scroller?.scrollTo({ top: scroller.scrollHeight });
+		if (activeChatTabId === tabId) {
+			optimistic = {
+				info: {
+					id: `pending-${Date.now()}`,
+					role: "user",
+					time: { created: Date.now() },
+				},
+				parts: [
+					{ id: "pending-text", type: "text", text: input.text },
+					...input.files.map((filename, i) => ({
+						id: `pending-file-${i}`,
+						type: "file",
+						filename,
+					})),
+				],
+			};
+			follow = true;
+			await tick();
+			scroller?.scrollTo({ top: scroller.scrollHeight });
+		}
 		return true;
 	} catch (reason) {
-		report(reason);
+		if (activeChatTabId === tabId) report(reason);
 		return false;
 	} finally {
-		sending = false;
+		sendingChatTabIds = sendingChatTabIds.filter((id) => id !== tabId);
 	}
 }
 async function stop() {
@@ -1258,6 +1517,23 @@ async function answer(requestId: string, answers: string[][]) {
     {#if noModels}<div role="alert" class="flex shrink-0 flex-wrap items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-5 py-3 text-sm text-amber-200"><TriangleAlert size={16} class="shrink-0 text-amber-300" /><p class="min-w-0 flex-1">Connected, but no models are configured in OpenCode. Add a provider (for example, run <code class="rounded bg-black/30 px-1 py-0.5 text-xs">opencode auth login</code>), then restart the daemon.</p><Button variant="outline" size="sm" onclick={reloadModels}><RefreshCw size={13} />Reload models</Button></div>{/if}
     <div class="flex min-h-0 flex-1">
 	<div class={`flex min-w-0 flex-1 flex-col ${activePanel === "files" && previewExpanded ? "hidden" : ""}`}>
+    {#if splitChat && viewMode === "chat"}
+      <SplitChatWorkspace project={selectedProject} {catalog} {customAgents} primarySessionId={sessionId} primaryModel={model} primaryAgent={agent} primaryCustomAgentId={customAgentId} primaryDraft={draft} onclose={leaveSplitChat} onfile={showFiles} onSession={registerSplitSession} />
+    {:else}
+    {#if viewMode === "chat"}
+      <div class="nice-scroll flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.08] bg-background/40 px-3 py-2" role="tablist" aria-label="Chat tabs">
+        {#each chatTabs as tab (tab.id)}
+          {@const isActive = tab.id === activeChatTabId}
+          {@const agentLabel = customAgents.find((item) => item.id === tab.customAgentId)?.label}
+          <div class={`group flex h-8 max-w-56 shrink-0 items-center rounded-md border transition ${isActive ? "border-white/15 bg-white/[0.08] text-foreground" : "border-transparent text-muted-foreground hover:bg-white/[0.04]"}`}>
+            <Button variant="ghost" role="tab" aria-selected={isActive} class="h-7 min-w-0 justify-start gap-2 px-2 text-xs" title={tab.label} onclick={() => void switchChatTab(tab.id)}><MessageSquare size={13} class="shrink-0" /><span class="max-w-40 truncate">{tab.sessionId ? tab.label : agentLabel ?? tab.label}</span>{#if isActive && sending}<span class="size-1.5 shrink-0 animate-pulse rounded-full bg-primary"></span>{/if}</Button>
+            <Button variant="ghost" size="icon" class="mr-0.5 size-6 shrink-0 opacity-60 hover:opacity-100" aria-label={`Close ${tab.label}`} title="Close tab" onclick={(event) => { event.stopPropagation(); void closeChatTab(tab.id); }}><X size={12} /></Button>
+          </div>
+        {/each}
+        <Button variant="ghost" size="icon" class="size-8 shrink-0 text-muted-foreground" aria-label="New chat tab" title="New chat tab" onclick={() => newChatTab()}><Plus size={15} /></Button>
+        <Button variant="ghost" size="icon" class="size-8 shrink-0 text-muted-foreground" aria-label="Open split chat" title="Open split chat" disabled={!selectedProjectId} onclick={openSplitChat}><Columns3 size={15} /></Button>
+      </div>
+    {/if}
     <div bind:this={scroller} onscroll={(event) => { const node = event.currentTarget; follow = node.scrollHeight - node.scrollTop - node.clientHeight < 100; }} class="nice-scroll min-h-0 flex-1 overflow-y-auto">
       <div class={`mx-auto flex min-h-full w-full max-w-[740px] flex-col px-5 ${sessionId ? "py-8" : "justify-center py-12"}`}>
         {#if loading || sessionLoading}<div role="status" class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"><LoaderCircle size={17} class="animate-spin" />Loading {loading ? "workspace" : "conversation"}…</div>
@@ -1278,6 +1554,7 @@ async function answer(requestId: string, answers: string[][]) {
       </div>
     </div>
     {#if sessionId && viewMode === "chat"}<div class="shrink-0 border-t bg-background px-5 py-4"><div class="mx-auto max-w-3xl"><Composer projectId={selectedProjectId} {catalog} {customAgents} {busy} disabled={!conversation || sessionLoading} onsend={send} onstop={stop} bind:draft bind:model bind:agent bind:customAgentId autoAccept={selectedProject?.autoAccept ?? false} onAutoAcceptChange={selectedProject ? (value) => void setAutoAccept(value) : undefined} /></div></div>{/if}
+    {/if}
     </div>
     {#if activePanel}
       <aside class={activePanel === "files" ? (previewExpanded ? "relative flex min-w-0 flex-1 flex-col border-l bg-card/30" : "relative flex w-[min(900px,76vw)] min-w-0 shrink-0 flex-col border-l bg-card/30") : activePanel === "walkthrough" ? "flex w-[min(850px,76vw)] shrink-0 flex-col border-l bg-card/30" : activePanel === "terminal" ? "flex w-[min(760px,70vw)] min-w-[400px] shrink-0 flex-col border-l bg-card/30" : "flex w-[320px] shrink-0 flex-col border-l bg-card/30 xl:w-[360px]"} aria-label={`${activePanel} panel`}>

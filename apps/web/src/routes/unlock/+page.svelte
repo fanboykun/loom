@@ -32,7 +32,9 @@ let isMounted = $state(false);
 onMount(() => {
 	if (isTrustedDevice()) {
 		const next = page.url.searchParams.get("next") || "/";
-		window.location.assign(next.startsWith("/") && !next.startsWith("//") ? next : "/");
+		window.location.assign(
+			next.startsWith("/") && !next.startsWith("//") ? next : "/",
+		);
 		return;
 	}
 	requestAnimationFrame(() => {
@@ -60,7 +62,9 @@ async function unlock() {
 	setTrustedDevice(remember);
 	sessionStorage.setItem("loom.ui.unlocked", "true");
 	const next = page.url.searchParams.get("next") || "/";
-	window.location.assign(next.startsWith("/") && !next.startsWith("//") ? next : "/");
+	window.location.assign(
+		next.startsWith("/") && !next.startsWith("//") ? next : "/",
+	);
 }
 
 const features = [
