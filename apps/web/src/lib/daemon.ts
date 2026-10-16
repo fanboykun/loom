@@ -140,6 +140,8 @@ export type ContextMemoryHistory = {
 export type ProjectGitOverview = {
 	branch: string;
 	defaultBranch: string;
+	branches: string[];
+	worktrees: Array<{ path: string; branch: string; current: boolean }>;
 	remoteUrl: string | null;
 	files: Array<{ status: string; path: string }>;
 	truncated: boolean;
@@ -425,6 +427,16 @@ export const daemon = {
 	getProject: (id: string) => request<Project>(`/api/projects/${id}`),
 	getProjectGit: (id: string) =>
 		request<ProjectGitOverview>(`/api/projects/${id}/git`),
+	checkoutProjectBranch: (id: string, branch: string) =>
+		request<{ branch: string }>(`/api/projects/${id}/git/checkout`, {
+			method: "POST",
+			body: JSON.stringify({ branch }),
+		}),
+	createProjectWorktree: (id: string, branch: string) =>
+		request<{ path: string; branch: string }>(`/api/projects/${id}/git/worktrees`, {
+			method: "POST",
+			body: JSON.stringify({ branch }),
+		}),
 	getProjectPullRequests: (id: string) =>
 		request<ProjectPullRequests>(`/api/projects/${id}/pull-requests`),
 	getProjectWalkthroughSnapshot: (id: string) =>

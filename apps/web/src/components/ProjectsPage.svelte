@@ -107,6 +107,9 @@ let searchOpen = $state(false);
 let search = $state("");
 let collapsed = $state<string[]>([]);
 let addProjectOpen = $state(false);
+let worktreeDialogOpen = $state(false);
+let worktreeBranchName = $state("");
+let worktreeCreating = $state(false);
 let aboutOpen = $state(false);
 let renameOpen = $state(false);
 let renameTitle = $state("");
@@ -187,6 +190,8 @@ let configurePanelsOpen = $state(false);
 let previewExpanded = $state(false);
 let previewHasUnsavedChanges = $state(false);
 let gitOverview = $state<ProjectGitOverview | null>(null);
+let workspaceOverview = $state<ProjectGitOverview | null>(null);
+let workspaceLoading = $state(false);
 let pullRequestData = $state<ProjectPullRequests | null>(null);
 let walkthroughSnapshot = $state<WalkthroughSnapshot | null>(null);
 let walkthroughProjectId = $state("");
@@ -237,6 +242,23 @@ let permissionReplying = $state<string | null>(null);
 const selectedProject = $derived(
 	projects.find((p) => p.id === selectedProjectId),
 );
+$effect(() => {
+	const id = selectedProjectId;
+	if (!id) {
+		workspaceOverview = null;
+		return;
+	}
+	let active = true;
+	workspaceLoading = true;
+	void daemon.getProjectGit(id).then((result) => {
+		if (active && id === selectedProjectId) workspaceOverview = result;
+	}).catch(() => {
+		if (active) workspaceOverview = null;
+	}).finally(() => {
+		if (active) workspaceLoading = false;
+	});
+	return () => { active = false; };
+});
 const availableChatPanels = $derived(
 	chatPanelRegistry.filter((panel) =>
 		panel.isAvailable({ projectId: selectedProjectId }),
@@ -767,21 +789,20 @@ const noModels = $derived(
 );
 const agentMonitorRows = $derived.by(() =>
 	monitorAgents.map((agent) => {
-		const run = monitorRuns
-			.filter(
-				(item) =>
-					item.agentId === agent.id &&
-					(item.status === "queued" || item.status === "running"),
-			)
+		const recentRuns = monitorRuns
+			.filter((item) => item.agentId === agent.id)
 			.sort(
 				(a, b) =>
 					monitorTimestamp(b.startedAt ?? b.createdAt) -
 					monitorTimestamp(a.startedAt ?? a.createdAt),
-			)[0];
+			);
+		const run = recentRuns.find(
+			(item) => item.status === "queued" || item.status === "running",
+		) ?? (recentRuns[0]?.status === "failed" ? recentRuns[0] : undefined);
 		const task = run?.taskId
 			? legacyTasks.find((item) => item.id === run.taskId)
 			: undefined;
-		return { agent, run, task };
+		return { agent, run, task, failed: run?.status === "failed" };
 	}),
 );
 const monitorRunningCount = $derived(
@@ -1495,6 +1516,47 @@ async function setAutoAccept(value: boolean) {
 		report(reason);
 	}
 }
+async function switchProjectWorkspace(value: string) {
+	const project = selectedProject;
+	if (!project || !value) return;
+	try {
+		if (value.startsWith("branch:")) {
+			const branch = value.slice("branch:".length);
+			await daemon.checkoutProjectBranch(project.id, branch);
+			workspaceOverview = await daemon.getProjectGit(project.id);
+			toast.success(`Switched to ${branch}`);
+		} else if (value.startsWith("worktree:")) {
+			const path = decodeURIComponent(value.slice("worktree:".length));
+			const updated = await daemon.updateProject(project.id, { path });
+			projects = projects.map((item) => item.id === updated.id ? updated : item);
+			workspaceOverview = await daemon.getProjectGit(project.id);
+			toast.success("Worktree selected");
+		} else if (value === "__new_worktree") {
+			worktreeBranchName = "";
+			worktreeDialogOpen = true;
+		}
+	} catch (reason) {
+		report(reason);
+	}
+}
+async function createProjectWorktree() {
+	const project = selectedProject;
+	const branch = worktreeBranchName.trim();
+	if (!project || !branch || worktreeCreating) return;
+	worktreeCreating = true;
+	try {
+		const workspace = await daemon.createProjectWorktree(project.id, branch);
+		const updated = await daemon.updateProject(project.id, { path: workspace.path });
+		projects = projects.map((item) => item.id === updated.id ? updated : item);
+		workspaceOverview = await daemon.getProjectGit(project.id);
+		worktreeDialogOpen = false;
+		toast.success(`Worktree ${workspace.branch} created`);
+	} catch (reason) {
+		report(reason);
+	} finally {
+		worktreeCreating = false;
+	}
+}
 async function answer(requestId: string, answers: string[][]) {
 	try {
 		await chat.question(sessionId, requestId, answers);
@@ -1616,7 +1678,8 @@ async function answer(requestId: string, answers: string[][]) {
 
         {#if error}<div role="alert" class="my-4 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm"><p class="min-w-0 flex-1 break-words text-destructive">{error}</p><Button variant="ghost" size="sm" onclick={retryConnection}><RefreshCw size={13} />Retry</Button><Button variant="ghost" size="icon" class="size-7" aria-label="Dismiss error" onclick={() => error = ""}><X size={13} /></Button></div>{/if}
         {#if !sessionId && !loading}
-          {#if !projects.length}<div class="mb-5 text-center"><p class="mb-3 text-sm text-muted-foreground">Add a local Git project to start chatting with OpenCode.</p><Button onclick={() => addProjectOpen = true}><FolderPlus size={16} />Add project</Button></div>{:else}<div class="mb-3"><Select.Root type="single" bind:value={selectedProjectId}><Select.Trigger class="h-10 w-auto min-w-40 gap-2 rounded-lg border border-white/10 bg-white/[0.05] px-3 text-sm text-white/75 shadow-none transition hover:bg-white/[0.08]" aria-label="Choose project"><Folder size={16} class="text-white/55" />{selectedProject?.name ?? "Choose project"}</Select.Trigger><Select.Content>{#each projects as project}<Select.Item value={project.id}>{project.name}</Select.Item>{/each}</Select.Content></Select.Root></div>{/if}
+          {#if !projects.length}<div class="mb-5 text-center"><p class="mb-3 text-sm text-muted-foreground">Add a local Git project to start chatting with OpenCode.</p><Button onclick={() => addProjectOpen = true}><FolderPlus size={16} />Add project</Button></div>{:else}<div class="mb-3 flex flex-wrap items-center gap-2"><Select.Root type="single" bind:value={selectedProjectId}><Select.Trigger class="h-10 w-auto min-w-40 gap-2 rounded-lg border border-white/10 bg-white/[0.05] px-3 text-sm text-white/75 shadow-none transition hover:bg-white/[0.08]" aria-label="Choose project"><Folder size={16} class="text-white/55" />{selectedProject?.name ?? "Choose project"}</Select.Trigger><Select.Content>{#each projects as project}<Select.Item value={project.id}>{project.name}</Select.Item>{/each}</Select.Content></Select.Root>
+            {#if workspaceOverview}<Select.Root type="single" value={`branch:${workspaceOverview.branch.split("...")[0]}`} onValueChange={(value) => void switchProjectWorkspace(value)}><Select.Trigger class="h-10 w-auto max-w-64 gap-2 rounded-lg border border-white/10 bg-white/[0.05] px-3 text-sm text-white/75 shadow-none transition hover:bg-white/[0.08]" aria-label="Choose branch or worktree" title="Choose branch or worktree"><GitBranch size={15} class="shrink-0 text-amber-300" /><span class="max-w-48 truncate">{workspaceOverview.branch.split("...")[0] || "Branch"}</span></Select.Trigger><Select.Content class="max-h-80"><Select.Group><Select.Label>Project root · {workspaceOverview.branch.split("...")[0]}</Select.Label>{#each workspaceOverview.branches as branch}<Select.Item value={`branch:${branch}`}>{branch}{branch === workspaceOverview.branch.split("...")[0] ? " · current" : ""}</Select.Item>{/each}</Select.Group>{#if workspaceOverview.worktrees.filter((item) => !item.current).length}<Select.Separator /><Select.Group><Select.Label>Worktrees</Select.Label>{#each workspaceOverview.worktrees.filter((item) => !item.current) as item}<Select.Item value={`worktree:${encodeURIComponent(item.path)}`}>{item.branch} · {item.path.split("/").at(-1)}</Select.Item>{/each}</Select.Group>{/if}<Select.Separator /><Select.Item value="__new_worktree">＋ New worktree…</Select.Item></Select.Content></Select.Root>{:else if workspaceLoading}<span class="px-2 text-xs text-muted-foreground">Loading branch…</span>{/if}</div>{/if}
            <Composer projectId={selectedProjectId} {catalog} {customAgents} {busy} disabled={!selectedProjectId || loading} onsend={send} onstop={stop} bind:draft bind:model bind:agent bind:customAgentId autoAccept={selectedProject?.autoAccept ?? false} onAutoAcceptChange={selectedProject ? (value) => void setAutoAccept(value) : undefined} />
 
           <div class="mt-5 flex flex-wrap justify-center gap-2">{#each prompts as prompt}<Button variant="outline" size="sm" class="rounded-full border-white/10 bg-white/[0.025] px-3.5 py-2 text-xs text-white/55 transition hover:border-white/20 hover:bg-white/[0.07] hover:text-white/80" onclick={() => draft = prompt.text}>{prompt.label}</Button>{/each}</div>
@@ -1652,8 +1715,11 @@ async function answer(requestId: string, answers: string[][]) {
                 {:else}<div class="space-y-2">{#each agentMonitorRows as item (item.agent.id)}
                   {@const running = item.run?.status === "running"}
                   {@const queued = item.run?.status === "queued"}
+                  {@const idle = item.agent.status === "active" && !item.run}
+                  {@const statusTone = item.failed ? "text-red-400" : running || queued ? "text-amber-300" : idle ? "text-emerald-400" : "text-muted-foreground"}
+                  {@const dotTone = item.failed ? "bg-red-400" : running || queued ? "bg-amber-300" : idle ? "bg-emerald-400" : "bg-muted-foreground"}
                   <article class="rounded-lg border bg-card/40 p-3">
-                    <div class="flex min-w-0 items-start gap-2"><div class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border bg-background/60"><Bot size={14} class="text-cyan-300" /></div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><p class="truncate text-xs font-medium">{item.agent.label}</p><Badge variant="outline" class={`shrink-0 px-1.5 py-0 text-[9px] ${running ? "border-emerald-500/30 text-emerald-300" : queued ? "border-amber-500/30 text-amber-200" : item.agent.status !== "active" ? "text-muted-foreground" : "text-sky-200"}`}>{running ? "Running" : queued ? "Queued" : item.agent.status === "active" ? "Idle" : "Inactive"}</Badge></div><p class="mt-1 truncate text-[10px] text-muted-foreground">{item.agent.role} · {item.agent.provider}</p>
+                    <div class="flex min-w-0 items-start gap-2"><div class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border bg-background/60"><Bot size={14} class="text-cyan-300" /></div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><p class="min-w-0 flex-1 truncate text-xs font-medium">{item.agent.label}</p><span class={`inline-flex shrink-0 items-center gap-1.5 text-[10px] font-medium ${statusTone}`} title={item.failed ? "The most recent agent run failed" : undefined}><span class="relative inline-flex size-2"><span class={`absolute inline-flex size-full rounded-full opacity-60 ${dotTone} ${idle || running || queued ? "animate-ping" : ""}`}></span><span class={`relative inline-flex size-2 rounded-full ${dotTone}`}></span></span>{item.failed ? "Error" : running ? "Running" : queued ? "Queued" : idle ? "Idle" : "Inactive"}</span></div><p class="mt-1 truncate text-[10px] text-muted-foreground">{item.agent.role} · {item.agent.provider}</p>
                       {#if item.run && (running || queued)}<p class="mt-2 flex items-start gap-1.5 text-[10px] leading-4 text-muted-foreground"><Activity size={12} class={`mt-0.5 shrink-0 ${running ? "text-emerald-300" : "text-amber-200"}`} />{item.task ? `In use · ${item.task.title}` : item.run.trigger === "chat" ? "In use · Chat session" : "Agent run active"}</p>{/if}
                     </div></div>
                   </article>
@@ -1822,6 +1888,7 @@ async function answer(requestId: string, answers: string[][]) {
 	</Dialog.Content>
 </Dialog.Root>
 <Dialog.Root bind:open={addProjectOpen}><Dialog.Content><Dialog.Header><Dialog.Title>Add project</Dialog.Title><Dialog.Description>Connect a local Git repository to OpenCode.</Dialog.Description></Dialog.Header><AddProjectForm oncreated={() => { addProjectOpen = false; void retryConnection(); }} /></Dialog.Content></Dialog.Root>
+<Dialog.Root bind:open={worktreeDialogOpen}><Dialog.Content><Dialog.Header><Dialog.Title>Create worktree</Dialog.Title><Dialog.Description>Create an isolated checkout on a new branch, then use it as this project’s active workspace.</Dialog.Description></Dialog.Header><form class="space-y-4" onsubmit={(event) => { event.preventDefault(); void createProjectWorktree(); }}><Input bind:value={worktreeBranchName} aria-label="New branch name" placeholder="feature/my-change" maxlength={240} /><Dialog.Footer><Dialog.Close class={buttonVariants({ variant: "outline" })}>Cancel</Dialog.Close><Button type="submit" disabled={!worktreeBranchName.trim() || worktreeCreating}>{worktreeCreating ? "Creating…" : "Create worktree"}</Button></Dialog.Footer></form></Dialog.Content></Dialog.Root>
 <Dialog.Root bind:open={renameOpen}><Dialog.Content><Dialog.Header><Dialog.Title>Rename session</Dialog.Title><Dialog.Description>Choose a title you can find in the sidebar.</Dialog.Description></Dialog.Header><form class="space-y-4" onsubmit={(event) => { event.preventDefault(); void rename(); }}><Input aria-label="Session title" bind:value={renameTitle} maxlength={200} /><Dialog.Footer><Button type="submit" disabled={!renameTitle.trim()}>Save title</Button></Dialog.Footer></form></Dialog.Content></Dialog.Root>
 <AlertDialog.Root bind:open={deleteSessionOpen}>
 	<AlertDialog.Content>

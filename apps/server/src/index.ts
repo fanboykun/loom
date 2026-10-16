@@ -1159,7 +1159,7 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		if (!project) return errorResponse(c, new Error("Project not found"));
 		try {
 			const repository = await projectValidation.validate(project.path);
-			const [status, diff, stagedDiff, remote] = await Promise.all([
+			const [status, diff, stagedDiff, remote, branchResult, worktreeResult] = await Promise.all([
 				runWorkspaceCommand(
 					"git",
 					["status", "--short", "--branch", "--untracked-files=all"],
@@ -1187,6 +1187,16 @@ export async function createApp(options: DaemonAppOptions = {}) {
 					["remote", "get-url", "origin"],
 					repository.path,
 				),
+				runWorkspaceCommand(
+					"git",
+					["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+					repository.path,
+				),
+				runWorkspaceCommand(
+					"git",
+					["worktree", "list", "--porcelain"],
+					repository.path,
+				),
 			]);
 			if (status.exitCode !== 0)
 				throw new Error(status.stderr.trim() || "Unable to read Git status");
@@ -1198,9 +1208,20 @@ export async function createApp(options: DaemonAppOptions = {}) {
 					status: line.slice(0, 2).trim() || "?",
 					path: line.slice(3).split(" -> ").at(-1) ?? line.slice(3),
 				}));
+			const worktrees = worktreeResult.stdout
+				.trim()
+				.split(/\n\n+/)
+				.filter(Boolean)
+				.map((entry) => {
+					const path = entry.match(/^worktree (.+)$/m)?.[1] ?? "";
+					const branch = entry.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? "(detached)";
+					return { path, branch, current: resolve(path) === resolve(repository.path) };
+				});
 			return c.json({
 				branch: lines[0]?.replace(/^##\s*/, "") || "Unknown branch",
 				defaultBranch: project.defaultBranch,
+				branches: branchResult.exitCode === 0 ? branchResult.stdout.split(/\r?\n/).filter(Boolean) : [],
+				worktrees,
 				remoteUrl:
 					remote.exitCode === 0
 						? remote.stdout.trim().replace(/(https?:\/\/)[^/@\s]+@/i, "$1")
@@ -1214,6 +1235,41 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		} catch (error) {
 			return errorResponse(c, error);
 		}
+	});
+	app.post("/api/projects/:id/git/checkout", async (c) => {
+		try {
+			const project = await repos.projects.getById(c.req.param("id"));
+			if (!project) return errorResponse(c, new Error("Project not found"));
+			const repository = await projectValidation.validate(project.path);
+			const { branch } = z.object({ branch: z.string().trim().min(1).max(240) }).parse(await jsonBody(c));
+			const valid = await runWorkspaceCommand("git", ["check-ref-format", "--branch", branch], repository.path);
+			if (valid.exitCode !== 0) throw new Error("Invalid branch name");
+			const status = await runWorkspaceCommand("git", ["status", "--porcelain", "--untracked-files=all"], repository.path);
+			if (status.exitCode !== 0) throw new Error(status.stderr.trim() || "Unable to read Git status");
+			if (status.stdout.trim()) throw new Error("Commit or stash local changes before switching branches.");
+			const listed = await runWorkspaceCommand("git", ["worktree", "list", "--porcelain"], repository.path);
+			if (listed.stdout.split(/\n\n+/).some((entry) => entry.includes(`\nbranch refs/heads/${branch}`) && resolve(entry.match(/^worktree (.+)$/m)?.[1] ?? "") !== resolve(repository.path)))
+				throw new Error("This branch is already checked out in another worktree.");
+			const switched = await runWorkspaceCommand("git", ["switch", branch], repository.path);
+			if (switched.exitCode !== 0) throw new Error(switched.stderr.trim() || "Unable to switch branch");
+			return c.json({ branch });
+		} catch (error) { return errorResponse(c, error); }
+	});
+	app.post("/api/projects/:id/git/worktrees", async (c) => {
+		try {
+			const project = await repos.projects.getById(c.req.param("id"));
+			if (!project) return errorResponse(c, new Error("Project not found"));
+			const repository = await projectValidation.validate(project.path);
+			const { branch } = z.object({ branch: z.string().trim().min(1).max(240) }).parse(await jsonBody(c));
+			const valid = await runWorkspaceCommand("git", ["check-ref-format", "--branch", branch], repository.path);
+			if (valid.exitCode !== 0) throw new Error("Enter a valid new branch name.");
+			const slug = branch.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+			const path = join(dataDirectory(), "worktrees", project.id, `${slug}-${randomUUID().slice(0, 8)}`);
+			await mkdir(dirname(path), { recursive: true });
+			const created = await runWorkspaceCommand("git", ["worktree", "add", "-b", branch, path, "HEAD"], repository.path, 30_000);
+			if (created.exitCode !== 0) throw new Error(created.stderr.trim() || "Unable to create worktree");
+			return c.json({ path, branch }, 201);
+		} catch (error) { return errorResponse(c, error); }
 	});
 	app.get("/api/projects/:id/pull-requests", async (c) => {
 		const project = await repos.projects.getById(c.req.param("id"));
