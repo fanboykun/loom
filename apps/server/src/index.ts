@@ -100,6 +100,7 @@ import {
 import { auth, checkDbHealth, getDb } from "./services";
 import { collectWalkthroughSnapshot } from "./walkthrough";
 import { TerminalManager } from "./terminal";
+import { checkProviderUpdate, updateProviderCli } from "./provider-updates";
 
 const { upgradeWebSocket, websocket: bunWebSocket } = createBunWebSocket();
 
@@ -1606,6 +1607,39 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		const connections = await providerManager.refreshAll();
 		void refreshConnectedProviderModels(connections);
 		return c.json(serializeProviders());
+	});
+	app.post("/api/providers/check-updates", async (c) => {
+		await discoverProviders();
+		const updates = await Promise.all(
+			providerManager.registry.list().map(async (adapter) => {
+				const connection = providerManager.get(adapter.definition.id);
+				return checkProviderUpdate({
+					providerId: adapter.definition.id,
+					name: adapter.definition.name,
+					installed: connection?.installed ?? false,
+					currentVersion: connection?.version ?? null,
+					executablePath: connection?.executablePath ?? null,
+				});
+			}),
+		);
+		return c.json({ checkedAt: new Date().toISOString(), updates });
+	});
+	app.post("/api/providers/:id/update", async (c) => {
+		const providerId = providerManager.normalizeProviderId(c.req.param("id"));
+		const adapter = providerManager.registry.get(providerId);
+		if (!adapter) return c.json({ error: "Unknown provider" }, 404);
+		const connection = await providerManager.refresh(providerId);
+		const result = await updateProviderCli({
+			providerId,
+			name: adapter.definition.name,
+			installed: connection.installed,
+			currentVersion: connection.version,
+			executablePath: connection.executablePath,
+		});
+		const refreshed = await providerManager.refresh(providerId);
+		if (refreshed.status === "connected")
+			void refreshConnectedProviderModels([refreshed]);
+		return c.json({ ...result, version: refreshed.version, provider: refreshed });
 	});
 	app.get("/api/providers/:id", async (c) => {
 		const connection = await providerManager.refresh(c.req.param("id"));

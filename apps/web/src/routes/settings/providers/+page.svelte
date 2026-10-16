@@ -3,6 +3,7 @@ import {
 	Check,
 	ChevronLeft,
 	Copy,
+	Download,
 	ExternalLink,
 	RefreshCw,
 	Terminal,
@@ -13,6 +14,7 @@ import { toast } from "svelte-sonner";
 import SettingsSidebar from "$lib/components/settings/SettingsSidebar.svelte";
 import { Button } from "$lib/components/ui/button";
 import { Input } from "$lib/components/ui/input";
+import * as AlertDialog from "$lib/components/ui/alert-dialog";
 import { daemon } from "$lib/daemon";
 
 type Provider = Awaited<ReturnType<typeof daemon.listProviders>>[number];
@@ -22,9 +24,16 @@ let checking = $state(false);
 let autoCheck = $state(false);
 let lastChecked = $state<string | null>(null);
 let search = $state("");
+let providerSearch = $state("");
+let updateChecks = $state<Awaited<ReturnType<typeof daemon.checkProviderUpdates>>["updates"]>([]);
+let updateDialogOpen = $state(false);
+let selectedUpdate = $state<(typeof updateChecks)[number] | null>(null);
+let updateState = $state<"idle" | "updating" | "success" | "error">("idle");
+let updateMessage = $state("");
+let updatingProviderId = $state<string | null>(null);
 const filtered = $derived(
 	providers.filter((provider) =>
-		provider.name.toLowerCase().includes(search.toLowerCase()),
+		provider.name.toLowerCase().includes(providerSearch.toLowerCase()),
 	),
 );
 const lastCheckedLabel = $derived(
@@ -54,7 +63,13 @@ async function checkProviders() {
 	checking = true;
 	try {
 		providers = await daemon.refreshProviders();
-		lastChecked = new Date().toISOString();
+		const result = await daemon.checkProviderUpdates();
+		updateChecks = result.updates;
+		lastChecked = result.checkedAt;
+		const available = result.updates.filter((item) => item.updateAvailable).length;
+		const failed = result.updates.filter((item) => item.error).length;
+		if (failed) toast.error(`Checked ${result.updates.length - failed} providers; ${failed} update checks failed`);
+		else toast.success(available ? `${available} provider update${available === 1 ? "" : "s"} available` : "Provider CLIs are up to date");
 	} catch (reason) {
 		toast.error(
 			reason instanceof Error
@@ -64,6 +79,47 @@ async function checkProviders() {
 	} finally {
 		loading = false;
 		checking = false;
+	}
+}
+
+function openUpdateDialog(update: (typeof updateChecks)[number]) {
+	selectedUpdate = update;
+	updateState = "idle";
+	updateMessage = "";
+	updateDialogOpen = true;
+}
+
+async function runProviderUpdate() {
+	if (!selectedUpdate || updatingProviderId) return;
+	const update = selectedUpdate;
+	if (!update.latestVersion) {
+		updateState = "error";
+		updateMessage = "The latest version is unavailable. Check for updates again before continuing.";
+		return;
+	}
+	updatingProviderId = update.providerId;
+	updateState = "updating";
+	updateMessage = `Updating ${update.name} to ${update.latestVersion}. This may take a few minutes.`;
+	try {
+		const result = await daemon.updateProvider(update.providerId);
+		providers = await daemon.refreshProviders();
+		const refreshedChecks = await daemon.checkProviderUpdates();
+		updateChecks = refreshedChecks.updates;
+		lastChecked = refreshedChecks.checkedAt;
+		if (!result.version || result.version.replace(/^v/, "") !== update.latestVersion.replace(/^v/, "")) {
+			updateState = "error";
+			updateMessage = result.version
+				? `Updater finished, but Loom detects ${result.version} instead of ${update.latestVersion}. Restart Loom or check the installation method.`
+				: `Updater finished, but Loom could not verify the installed version. Restart Loom and check the provider again.`;
+			return;
+		}
+		updateState = "success";
+		updateMessage = `${update.name} updated to ${result.version ?? result.latestVersion}.`;
+	} catch (reason) {
+		updateState = "error";
+		updateMessage = reason instanceof Error ? reason.message : `Unable to update ${update.name}`;
+	} finally {
+		updatingProviderId = null;
 	}
 }
 
@@ -126,4 +182,22 @@ async function copyCommand(command: string) {
 </script>
 
 <svelte:head><title>Providers · Loom</title></svelte:head>
-<div class="min-h-svh bg-[#090909] text-neutral-100"><div class="mx-auto flex min-h-svh max-w-[1500px]"><SettingsSidebar active="providers" bind:search /><main class="min-w-0 flex-1 px-4 py-8 sm:px-8 lg:px-12 lg:py-10"><div class="mx-auto max-w-5xl"><div class="mb-8 flex items-start justify-between gap-4"><div><p class="mb-2 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Agents</p><h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">Providers</h1><p class="mt-2 text-sm text-neutral-500">Manage your local agent CLIs — connections, installation, and authentication.</p></div><Button href="/settings" variant="outline" size="sm"><ChevronLeft class="size-4" />Settings</Button></div><section class="mb-8"><p class="mb-3 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Automatic CLI checks</p><div class="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-white/[0.035] p-5"><div><h2 class="text-sm font-semibold">Check for CLI updates automatically</h2><p class="mt-1 text-sm text-neutral-500">Last checked: {lastCheckedLabel}</p></div><div class="flex items-center gap-3"><Button variant="outline" size="sm" disabled={checking} onclick={() => void checkProviders()}><RefreshCw class={`size-4 ${checking ? "animate-spin" : ""}`} />Check now</Button><button type="button" role="switch" aria-checked={autoCheck} class={`relative h-6 w-11 rounded-full ${autoCheck ? "bg-emerald-500" : "bg-white/15"}`} onclick={() => autoCheck = !autoCheck}><span class={`absolute top-1 size-4 rounded-full bg-white transition ${autoCheck ? "left-6" : "left-1"}`}></span><span class="sr-only">Toggle automatic CLI checks</span></button></div></div></section><section class="mb-8"><p class="mb-3 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Local CLI</p><div class="overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035]">{#if loading && !providers.length}<div class="p-5 text-sm text-neutral-500">Loading providers…</div>{:else}{#each filtered as provider}<div class="flex flex-wrap items-center gap-4 border-b border-white/[0.08] p-5 last:border-0"><div class="flex min-w-0 flex-1 items-center gap-3"><div class="flex size-9 items-center justify-center rounded-lg bg-white/[0.08] text-neutral-300"><Terminal class="size-5" /></div><div class="min-w-0"><p class="font-medium">{provider.name} <span class="ml-1 font-mono text-xs text-neutral-500">{provider.version ?? provider.command}</span></p><p class={`mt-1 flex items-center gap-1 text-xs ${provider.installed ? "text-emerald-400" : "text-neutral-500"}`}>{#if provider.installed}<Check class="size-3" />Available{:else}<X class="size-3" />Not installed{/if}</p></div></div>{#if provider.status === "connected" || provider.authenticated}<Button variant="outline" size="sm" onclick={() => void disconnect(provider)}>Disconnect</Button>{:else if provider.installed}<Button variant="outline" size="sm" onclick={() => void connect(provider)}>Connect</Button>{:else}<Button variant="outline" size="sm" onclick={() => void connect(provider)}><ExternalLink class="size-4" />Install</Button>{/if}</div>{/each}{/if}</div></section><section><p class="mb-3 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Connection details</p><div class="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><h2 class="text-sm font-semibold">OpenCode authentication</h2><p class="mt-1 text-sm text-neutral-500">Loom uses the installed OpenCode CLI and its local provider configuration. Run authentication in a terminal if the browser cannot launch it.</p><div class="mt-4 flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2"><code class="truncate text-xs text-neutral-400">opencode auth login</code><Button variant="ghost" size="icon-sm" aria-label="Copy OpenCode auth command" onclick={() => void copyCommand("opencode auth login")}><Copy class="size-4" /></Button></div></div></section></div></main></div></div>
+<div class="min-h-svh bg-[#090909] text-neutral-100"><div class="mx-auto flex min-h-svh max-w-[1500px]"><SettingsSidebar active="providers" bind:search /><main class="min-w-0 flex-1 px-4 py-8 sm:px-8 lg:px-12 lg:py-10"><div class="mx-auto max-w-5xl"><div class="mb-8 flex items-start justify-between gap-4"><div><p class="mb-2 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Agents</p><h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">Providers</h1><p class="mt-2 text-sm text-neutral-500">Manage your local agent CLIs — connections, installation, and authentication.</p></div><Button href="/settings" variant="outline" size="sm"><ChevronLeft class="size-4" />Settings</Button></div><section class="mb-8"><p class="mb-3 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Automatic CLI checks</p><div class="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-white/[0.035] p-5"><div><h2 class="text-sm font-semibold">Check for CLI updates automatically</h2><p class="mt-1 text-sm text-neutral-500">Last checked: {lastCheckedLabel}</p></div><div class="flex items-center gap-3"><Button variant="outline" size="sm" disabled={checking} onclick={() => void checkProviders()}><RefreshCw class={`size-4 ${checking ? "animate-spin" : ""}`} />Check now</Button><button type="button" role="switch" aria-checked={autoCheck} class={`relative h-6 w-11 rounded-full ${autoCheck ? "bg-emerald-500" : "bg-white/15"}`} onclick={() => autoCheck = !autoCheck}><span class={`absolute top-1 size-4 rounded-full bg-white transition ${autoCheck ? "left-6" : "left-1"}`}></span><span class="sr-only">Toggle automatic CLI checks</span></button></div></div></section>
+<section class="mb-8"><div class="mb-3 flex items-center justify-between gap-3"><p class="text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Provider updates{#if updateChecks.some((item) => item.updateAvailable)} — {updateChecks.filter((item) => item.updateAvailable).length} available{/if}</p><Input class="max-w-56" placeholder="Filter providers…" bind:value={providerSearch} /></div>{#if !lastChecked}<div class="rounded-2xl border border-dashed border-white/10 p-5 text-sm text-neutral-500">Select <span class="text-neutral-300">Check now</span> to compare installed CLI versions with their latest releases.</div>{:else}<div class="overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035]">{#each updateChecks.filter((item) => item.name.toLowerCase().includes(providerSearch.toLowerCase())) as update}<div class="flex flex-wrap items-center gap-4 border-b border-white/[0.08] p-4 last:border-0"><div class="min-w-0 flex-1"><p class="font-medium">{update.name}</p>{#if update.error}<p class="mt-1 text-xs text-amber-300">Could not check latest version: {update.error}</p>{:else if !update.installed}<p class="mt-1 text-xs text-neutral-500">Not installed</p>{:else if update.updateAvailable}<p class="mt-1 font-mono text-xs text-neutral-400">{update.currentVersion} → {update.latestVersion}</p>{:else}<p class="mt-1 text-xs text-neutral-500">{update.currentVersion ?? "Version unknown"} · Up to date</p>{/if}</div>{#if update.updateAvailable && update.updateSupported}<Button variant="outline" size="sm" disabled={updatingProviderId !== null} onclick={() => openUpdateDialog(update)}><Download class="size-4" />Update</Button>{:else if update.updateAvailable && update.updateCommand}<div class="flex max-w-full items-center gap-2"><code class="max-w-[min(24rem,60vw)] truncate rounded border border-white/10 px-2 py-1 text-xs text-neutral-400">{update.updateCommand}</code><Button variant="ghost" size="icon-sm" aria-label={`Copy ${update.name} update command`} onclick={() => void copyCommand(update.updateCommand!)}><Copy class="size-4" /></Button></div>{:else if update.installed && !update.error}<span class="text-xs text-neutral-500">No update available</span>{/if}</div>{/each}</div>{/if}</section>
+<section class="mb-8"><p class="mb-3 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Local CLI</p><div class="overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035]">{#if loading && !providers.length}<div class="p-5 text-sm text-neutral-500">Loading providers…</div>{:else}{#each filtered as provider}<div class="flex flex-wrap items-center gap-4 border-b border-white/[0.08] p-5 last:border-0"><div class="flex min-w-0 flex-1 items-center gap-3"><div class="flex size-9 items-center justify-center rounded-lg bg-white/[0.08] text-neutral-300"><Terminal class="size-5" /></div><div class="min-w-0"><p class="font-medium">{provider.name} <span class="ml-1 font-mono text-xs text-neutral-500">{provider.version ?? provider.command}</span></p><p class={`mt-1 flex items-center gap-1 text-xs ${provider.installed ? "text-emerald-400" : "text-neutral-500"}`}>{#if provider.installed}<Check class="size-3" />Available{:else}<X class="size-3" />Not installed{/if}</p></div></div>{#if provider.status === "connected" || provider.authenticated}<Button variant="outline" size="sm" onclick={() => void disconnect(provider)}>Disconnect</Button>{:else if provider.installed}<Button variant="outline" size="sm" onclick={() => void connect(provider)}>Connect</Button>{:else}<Button variant="outline" size="sm" onclick={() => void connect(provider)}><ExternalLink class="size-4" />Install</Button>{/if}</div>{/each}{/if}</div></section><section><p class="mb-3 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Connection details</p><div class="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><h2 class="text-sm font-semibold">OpenCode authentication</h2><p class="mt-1 text-sm text-neutral-500">Loom uses the installed OpenCode CLI and its local provider configuration. Run authentication in a terminal if the browser cannot launch it.</p><div class="mt-4 flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2"><code class="truncate text-xs text-neutral-400">opencode auth login</code><Button variant="ghost" size="icon-sm" aria-label="Copy OpenCode auth command" onclick={() => void copyCommand("opencode auth login")}><Copy class="size-4" /></Button></div></div></section></div></main></div></div>
+<AlertDialog.Root bind:open={updateDialogOpen}>
+	<AlertDialog.Content>
+		<AlertDialog.Header>
+			<AlertDialog.Title>{updateState === "success" ? "Update complete" : updateState === "error" ? "Update needs attention" : updateState === "updating" ? "Updating provider" : `Update ${selectedUpdate?.name ?? "provider"}?`}</AlertDialog.Title>
+			<AlertDialog.Description>
+				{#if updateState === "idle"}{selectedUpdate?.name} will be updated from {selectedUpdate?.currentVersion} to {selectedUpdate?.latestVersion}. Loom runs the provider's official updater and refreshes the detected version afterward.{:else}{updateMessage}{/if}
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+		{#if updateState === "updating"}<div class="flex items-center gap-3 rounded-lg border border-white/10 bg-white/[0.04] p-3 text-sm text-neutral-300"><RefreshCw class="size-4 animate-spin" />{updateMessage}</div>{/if}
+		<AlertDialog.Footer>
+			{#if updateState === "idle"}<Button variant="outline" onclick={() => updateDialogOpen = false}>Cancel</Button><Button onclick={() => void runProviderUpdate()}><Download class="size-4" />Update now</Button>
+			{:else if updateState === "updating"}<Button variant="outline" disabled>Updating…</Button>
+			{:else}<Button variant="outline" onclick={() => updateDialogOpen = false}>Close</Button>{/if}
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>

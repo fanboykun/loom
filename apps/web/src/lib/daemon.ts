@@ -430,6 +430,30 @@ export const daemon = {
 				capabilities: string[];
 			}>
 		>("/api/providers/refresh-all", { method: "POST" }),
+	checkProviderUpdates: () =>
+		request<{
+			checkedAt: string;
+			updates: Array<{
+				providerId: string;
+				name: string;
+				installed: boolean;
+				currentVersion: string | null;
+				latestVersion: string | null;
+				updateAvailable: boolean;
+				updateSupported: boolean;
+				updateCommand: string | null;
+				error: string | null;
+			}>;
+		}>("/api/providers/check-updates", { method: "POST" }),
+	updateProvider: (id: string) =>
+		request<{
+			providerId: string;
+			name: string;
+			previousVersion: string | null;
+			latestVersion: string;
+			version: string | null;
+			output: string;
+		}>(`/api/providers/${encodeURIComponent(id)}/update`, { method: "POST" }),
 	authProvider: (id: string) =>
 		request<{
 			launched: boolean;
