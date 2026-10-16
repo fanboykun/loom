@@ -1,5 +1,6 @@
 import type { LucideIcon } from "@lucide/svelte";
 import {
+	Bot,
 	FileDiff,
 	FolderOpen,
 	Gauge,
@@ -16,7 +17,8 @@ export type ChatPanelId =
 	| "pull-requests"
 	| "changes"
 	| "walkthrough"
-	| "terminal";
+	| "terminal"
+	| "agents";
 
 export type ChatPanelContext = {
 	projectId: string;
@@ -99,6 +101,15 @@ export const chatPanelRegistry: readonly ChatPanelDefinition[] = [
 		configurable: true,
 		isAvailable: needsProject,
 		open: ({ openPanel }) => openPanel("terminal"),
+	},
+	{
+		id: "agents",
+		label: "Agents & tasks",
+		icon: Bot,
+		defaultVisible: true,
+		configurable: true,
+		isAvailable: () => true,
+		open: ({ openPanel }) => openPanel("agents"),
 	},
 ];
 

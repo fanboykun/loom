@@ -1,5 +1,7 @@
 <script lang="ts">
 import {
+	Activity,
+	Bot,
 	Check,
 	ChevronDown,
 	CircleHelp,
@@ -11,6 +13,7 @@ import {
 	GitBranch,
 	GitPullRequest,
 	ListTree,
+	ListTodo,
 	LoaderCircle,
 	MessageSquare,
 	MessageSquarePlus,
@@ -65,6 +68,8 @@ import {
 	type Project,
 	type ProjectGitOverview,
 	type ProjectPullRequests,
+	type CustomAgentMonitorItem,
+	type CustomAgentRunMonitorItem,
 	type Task,
 	type WalkthroughDocument,
 	type WalkthroughLanguage,
@@ -81,6 +86,11 @@ import TerminalPanel from "./TerminalPanel.svelte";
 let projects = $state<Project[]>([]);
 let sessions = $state<ChatSession[]>([]);
 let legacyTasks = $state<Task[]>([]);
+let monitorAgents = $state<CustomAgentMonitorItem[]>([]);
+let monitorRuns = $state<CustomAgentRunMonitorItem[]>([]);
+let monitorError = $state("");
+let monitorRequest = 0;
+let monitorTimer: ReturnType<typeof setInterval> | undefined;
 let selectedProjectId = $state("");
 let sessionId = $state("");
 let conversation = $state<ChatState | null>(null);
@@ -138,7 +148,7 @@ let fileError = $state("");
 let fileName = $state("");
 let fileContent = $state("");
 let diffs = $state<FileDiff[]>([]);
-let activePanel = $state<ChatPanelId | null>(null);
+let activePanel = $state<ChatPanelId | null>("agents");
 let panelPreferences = $state<RailPanelPreferences>(defaultRailPanelPreferences());
 let panelPreferencesReady = $state(false);
 let panelPreferencesSaveError = $state(false);
@@ -640,6 +650,7 @@ $effect(() => {
 $effect(() => {
 	const projectId = selectedProjectId;
 	void catalogNonce;
+	void refreshAgentMonitor();
 	if (!projectId) return;
 	const request = ++projectRequest;
 	const cachedCatalog = chat.cachedCatalog(projectId);
@@ -684,6 +695,26 @@ const noModels = $derived(
 		!!selectedProjectId &&
 		catalog.models.length === 0,
 );
+const agentMonitorRows = $derived.by(() => monitorAgents.map((agent) => {
+	const run = monitorRuns
+		.filter((item) => item.agentId === agent.id && (item.status === "queued" || item.status === "running"))
+		.sort((a, b) => monitorTimestamp(b.startedAt ?? b.createdAt) - monitorTimestamp(a.startedAt ?? a.createdAt))[0];
+	const task = run?.taskId ? legacyTasks.find((item) => item.id === run.taskId) : undefined;
+	return { agent, run, task };
+}));
+const monitorRunningCount = $derived(agentMonitorRows.filter(({ run }) => run?.status === "running").length);
+const monitorIdleCount = $derived(agentMonitorRows.filter(({ run, agent }) => agent.status === "active" && !run).length);
+const visibleMonitorTasks = $derived(legacyTasks
+	.filter((task) => !selectedProjectId || task.projectId === selectedProjectId)
+	.slice()
+	.sort((a, b) => monitorTimestamp(b.createdAt) - monitorTimestamp(a.createdAt))
+	.slice(0, 8));
+function monitorTimestamp(value: string | number | null | undefined) {
+	if (typeof value === "number") return value;
+	if (!value) return 0;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
 async function reloadModels() {
 	catalogNonce += 1;
 	await retryConnection();
@@ -701,6 +732,25 @@ async function poll() {
 		if (!disposed) timer = setTimeout(poll, 1200);
 	}
 }
+async function refreshAgentMonitor() {
+	const request = ++monitorRequest;
+	const projectId = selectedProjectId;
+	try {
+		const [agents, runs, tasks] = await Promise.all([
+			daemon.listCustomAgents(projectId || undefined),
+			daemon.listCustomAgentRuns(projectId || undefined),
+			daemon.listTasks(),
+		]);
+		if (disposed || request !== monitorRequest || projectId !== selectedProjectId) return;
+		monitorAgents = agents;
+		monitorRuns = runs;
+		legacyTasks = tasks;
+		monitorError = "";
+	} catch (reason) {
+		if (!disposed && request === monitorRequest)
+			monitorError = reason instanceof Error ? reason.message : "Unable to load agent activity.";
+	}
+}
 onMount(() => {
 	sidebarOpen = window.innerWidth >= 768;
 	try {
@@ -710,6 +760,9 @@ onMount(() => {
 		panelPreferencesSaveError = true;
 	}
 	panelPreferencesReady = true;
+	const agentsPanel = chatPanelRegistry.find((panel) => panel.id === "agents");
+	if (agentsPanel && !isChatPanelVisible(agentsPanel, panelPreferences))
+		activePanel = null;
 	const syncPanelPreferences = (event: StorageEvent) => {
 		if (event.key !== railPanelPreferencesKey && event.key !== null) return;
 		panelPreferences = parseRailPanelPreferences(event.key === null ? null : event.newValue);
@@ -727,6 +780,7 @@ onMount(() => {
 			if (sourceProject && projects.some((p) => p.id === sourceProject))
 				selectedProjectId = sourceProject;
 			legacyTasks = await daemon.listTasks();
+			void refreshAgentMonitor();
 			model = preferredModel(selectedProjectId);
 			try {
 				automationMode = (await daemon.getAutomationSettings()).automationMode;
@@ -741,6 +795,7 @@ onMount(() => {
 		} finally {
 			loading = false;
 			void poll();
+			monitorTimer = setInterval(() => void refreshAgentMonitor(), 5000);
 		}
 	})();
 	return () => {
@@ -748,6 +803,7 @@ onMount(() => {
 		window.removeEventListener("storage", syncPanelPreferences);
 		window.removeEventListener("loom:providers-changed", refreshProviders);
 		clearTimeout(timer);
+		if (monitorTimer) clearInterval(monitorTimer);
 	};
 });
 function homeUrl(session = "") {
@@ -794,7 +850,8 @@ async function showPanel(panel: ChatPanelId, force = false) {
 	const projectId = selectedProjectId;
 	const currentSession = sessionId;
 	panelLoading = false;
-	if (panel === "context" || panel === "files" || panel === "terminal") {
+	if (panel === "context" || panel === "files" || panel === "terminal" || panel === "agents") {
+		if (panel === "agents") void refreshAgentMonitor();
 		if (panel === "terminal" && !projectId)
 			panelError = "Choose a project before opening a terminal.";
 		return;
@@ -1178,7 +1235,6 @@ async function answer(requestId: string, answers: string[][]) {
             {/each}{#if !sessions.some((s) => s.projectId === project.id)}<p class="py-2 text-xs text-muted-foreground">No chats yet.</p>{/if}</div>{/if}
           </section>
         {/each}
-        {#if legacyTasks.length}<section class="mt-6"><p class="px-2 py-2 text-[11px] uppercase tracking-wider text-muted-foreground">Task boards</p>{#each projects.filter(p => legacyTasks.some(t => t.projectId === p.id)) as project}<Button href={`/?project=${project.id}&view=kanban`} variant="ghost" class="h-8 w-full justify-start text-xs text-muted-foreground">{project.name}<Badge variant="outline" class="ml-auto">{legacyTasks.filter(t => t.projectId === project.id).length}</Badge></Button>{/each}</section>{/if}
       </nav>
       <div class="flex items-center gap-1 border-t p-3"><Button href="/settings" variant="ghost" size="icon" title="Settings" aria-label="Settings"><Settings size={16} /></Button><Button variant="ghost" size="icon" title="About Loom" aria-label="About Loom" onclick={() => aboutOpen = true}><CircleHelp size={16} /></Button><Button variant="ghost" size="sm" class="ml-auto text-xs text-muted-foreground" onclick={retryConnection} title="Refresh connection"><span class={`size-1.5 rounded-full ${connected ? "bg-emerald-400" : "bg-amber-400"}`}></span>{connected ? "Connected" : "Reconnect"}</Button></div>
     </aside>
@@ -1231,12 +1287,41 @@ async function answer(requestId: string, answers: string[][]) {
           {#key selectedProjectId}<TerminalPanel projectId={selectedProjectId} />{/key}
         {:else}
         <div class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-          <p class="min-w-0 flex-1 truncate text-sm font-medium">{activePanel === "context" ? "Context usage" : activePanel === "git" ? "Git" : activePanel === "pull-requests" ? "Pull requests" : activePanel === "walkthrough" ? "Walkthrough" : "Changes"}</p>
+          <p class="min-w-0 flex-1 truncate text-sm font-medium">{activePanel === "agents" ? "Agents & tasks" : activePanel === "context" ? "Context usage" : activePanel === "git" ? "Git" : activePanel === "pull-requests" ? "Pull requests" : activePanel === "walkthrough" ? "Walkthrough" : "Changes"}</p>
           {#if activePanel !== "context"}<Button variant="ghost" size="icon" class="size-7" aria-label="Refresh panel" title="Refresh" onclick={() => void showPanel(activePanel!, true)} disabled={panelLoading}><RefreshCw size={13} class={panelLoading ? "animate-spin" : ""} /></Button>{/if}
         </div>
         <div class="nice-scroll min-h-0 flex-1 overflow-y-auto p-4">
           {#if panelError}<p role="alert" class="mb-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{panelError}</p>{/if}
-          {#if activePanel === "context"}
+          {#if activePanel === "agents"}
+            <div class="space-y-5">
+              {#if monitorError}<p role="alert" class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{monitorError}</p>{/if}
+              <section class="rounded-lg border bg-card/50 p-3">
+                <div class="flex items-center justify-between gap-2"><div class="flex items-center gap-2"><Activity size={14} class="text-primary" /><p class="text-xs font-medium">Agent activity</p></div><span class="text-[10px] text-muted-foreground">Live · 5s</span></div>
+                <div class="mt-3 grid grid-cols-2 gap-2"><div class="rounded-md border bg-background/50 p-2"><p class="text-[10px] text-muted-foreground">Running</p><p class="mt-1 text-lg font-semibold">{monitorRunningCount}</p></div><div class="rounded-md border bg-background/50 p-2"><p class="text-[10px] text-muted-foreground">Idle</p><p class="mt-1 text-lg font-semibold">{monitorIdleCount}</p></div></div>
+              </section>
+              <section>
+                <div class="mb-2 flex items-center justify-between"><h3 class="text-xs font-semibold">Registered agents</h3><a href="/settings/agents" class="text-[10px] text-primary hover:underline">Manage</a></div>
+                {#if !agentMonitorRows.length}<p class="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No custom agents have been created yet.</p>
+                {:else}<div class="space-y-2">{#each agentMonitorRows as item (item.agent.id)}
+                  {@const running = item.run?.status === "running"}
+                  {@const queued = item.run?.status === "queued"}
+                  <article class="rounded-lg border bg-card/40 p-3">
+                    <div class="flex min-w-0 items-start gap-2"><div class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border bg-background/60"><Bot size={14} class="text-cyan-300" /></div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><p class="truncate text-xs font-medium">{item.agent.label}</p><Badge variant="outline" class={`shrink-0 px-1.5 py-0 text-[9px] ${running ? "border-emerald-500/30 text-emerald-300" : queued ? "border-amber-500/30 text-amber-200" : item.agent.status !== "active" ? "text-muted-foreground" : "text-sky-200"}`}>{running ? "Running" : queued ? "Queued" : item.agent.status === "active" ? "Idle" : "Inactive"}</Badge></div><p class="mt-1 truncate text-[10px] text-muted-foreground">{item.agent.role} · {item.agent.provider}</p>
+                      {#if item.run && (running || queued)}<p class="mt-2 flex items-start gap-1.5 text-[10px] leading-4 text-muted-foreground"><Activity size={12} class={`mt-0.5 shrink-0 ${running ? "text-emerald-300" : "text-amber-200"}`} />{item.task ? `In use · ${item.task.title}` : item.run.trigger === "chat" ? "In use · Chat session" : "Agent run active"}</p>{/if}
+                    </div></div>
+                  </article>
+                {/each}</div>{/if}
+              </section>
+              <section>
+                <div class="mb-2 flex items-center justify-between"><h3 class="flex items-center gap-1.5 text-xs font-semibold"><ListTodo size={13} />Tasks</h3><a href={selectedProjectId ? `/?project=${encodeURIComponent(selectedProjectId)}&view=kanban` : "/?view=kanban"} class="text-[10px] text-primary hover:underline">Open board</a></div>
+                {#if !visibleMonitorTasks.length}<p class="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No tasks to show{selectedProject ? ` for ${selectedProject.name}` : ""}.</p>
+                {:else}<div class="space-y-1">{#each visibleMonitorTasks as task (task.id)}
+                  {@const taskProject = projects.find((project) => project.id === task.projectId)}
+                  <a href={`/?project=${encodeURIComponent(task.projectId)}&view=kanban`} class="flex min-w-0 items-center gap-2 rounded-md border border-transparent px-2 py-2 transition hover:border-border hover:bg-accent/30"><span class={`size-1.5 shrink-0 rounded-full ${task.status === "running" ? "bg-emerald-400" : task.status === "failed" || task.status === "merge_conflict" ? "bg-red-400" : task.status === "completed" ? "bg-sky-300" : "bg-amber-300"}`}></span><span class="min-w-0 flex-1"><span class="block truncate text-[11px]">{task.title}</span><span class="mt-0.5 block truncate text-[9px] text-muted-foreground">{taskProject?.name ?? "Project"} · {task.status.replaceAll("_", " ")}</span></span></a>
+                {/each}</div>{/if}
+              </section>
+            </div>
+          {:else if activePanel === "context"}
             <div class="flex flex-col gap-3">
               <section class="rounded-xl border bg-card/70 p-4">
                 <p class="text-xs text-muted-foreground">Latest provider context</p>
@@ -1351,7 +1436,7 @@ async function answer(requestId: string, answers: string[][]) {
     <nav class="flex w-11 shrink-0 flex-col items-center gap-1 border-l bg-card/20 py-2" aria-label="Chat tools">
       {#each visibleChatPanels as panel (panel.id)}
         {@const PanelIcon = panel.icon}
-        <Button variant="ghost" size="icon" class={`size-9 ${activePanel === panel.id ? "bg-accent text-primary" : "text-muted-foreground"}`} aria-label={panel.label} title={panel.label} aria-pressed={activePanel === panel.id} onclick={() => openRegisteredPanel(panel.id)}><PanelIcon size={16} /></Button>
+        <Button variant="ghost" size="icon" class={`relative size-9 ${activePanel === panel.id ? "bg-accent text-primary" : "text-muted-foreground"}`} aria-label={panel.label} title={panel.id === "agents" && monitorRunningCount ? `${panel.label} · ${monitorRunningCount} running` : panel.label} aria-pressed={activePanel === panel.id} onclick={() => openRegisteredPanel(panel.id)}><PanelIcon size={16} />{#if panel.id === "agents" && monitorRunningCount}<span class="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-emerald-400" aria-hidden="true"></span>{/if}</Button>
       {/each}
       <div class="mt-auto border-t border-white/10 pt-1">
         <Button variant="ghost" size="icon" class="size-9 text-muted-foreground" aria-label="Configure panels" title="Configure panels" onclick={() => configurePanelsOpen = true}><SlidersHorizontal size={16} /></Button>

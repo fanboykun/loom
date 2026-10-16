@@ -238,7 +238,7 @@ onMount(async () => {
 });
 
 async function reload() {
-	agents = (await daemon.listCustomAgents(projectId || undefined)) as Agent[];
+	agents = (await daemon.listCustomAgents(projectId || undefined)) as unknown as Agent[];
 }
 function resetForm() {
 	editingId = "";

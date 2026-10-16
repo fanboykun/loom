@@ -263,6 +263,29 @@ export type Task = {
 	startedAt: string | null;
 	completedAt: string | null;
 };
+export type CustomAgentMonitorItem = {
+	id: string;
+	label: string;
+	role: string;
+	status: string;
+	allowChat: boolean;
+	projectId: string | null;
+	provider: string;
+	modelId: string | null;
+	lastUsedAt: string | number | null;
+};
+export type CustomAgentRunMonitorItem = {
+	id: string;
+	agentId: string;
+	projectId: string;
+	taskId: string | null;
+	chatSessionId: string | null;
+	status: string;
+	trigger: string;
+	createdAt: string | number;
+	startedAt: string | number | null;
+	finishedAt: string | number | null;
+};
 export type AgentRun = ProtocolAgentRun & {
 	startedAt: string | null;
 	completedAt: string | null;
@@ -502,7 +525,7 @@ export const daemon = {
 			}>
 		>("/api/models"),
 	listCustomAgents: (projectId?: string) =>
-		request<Array<Record<string, unknown>>>(
+		request<CustomAgentMonitorItem[]>(
 			`/api/agents${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
 		),
 	listContextEntries: (projectId?: string) =>
@@ -564,7 +587,7 @@ export const daemon = {
 			`/api/agents/runs/${encodeURIComponent(id)}`,
 		),
 	listCustomAgentRuns: (projectId?: string) =>
-		request<Array<{ agentId: string; createdAt: string | number }>>(
+		request<CustomAgentRunMonitorItem[]>(
 			`/api/agents/runs${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
 		),
 	assignCustomAgent: (input: {
