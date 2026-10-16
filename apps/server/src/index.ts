@@ -84,6 +84,7 @@ import { cors } from "hono/cors";
 import { z } from "zod";
 import { createAgentSettingsRoutes } from "./agents";
 import { createContextHubRoutes } from "./context-hub";
+import { createMcpManagerRoutes } from "./mcp-manager";
 import { registerAgyPermissionHook } from "./agy-hooks";
 import { type ChatRequestGateway, createChatRoutes } from "./chat";
 import { type DaemonConfig, loadDaemonConfig } from "./config";
@@ -999,6 +1000,7 @@ export async function createApp(options: DaemonAppOptions = {}) {
 		"/api/context",
 		createContextHubRoutes({ db, projects: repos.projects }),
 	);
+	app.route("/api/mcp", createMcpManagerRoutes({ projects: repos.projects }));
 	app.route(
 		"/api/agents",
 		createAgentSettingsRoutes({

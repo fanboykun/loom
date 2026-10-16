@@ -16,7 +16,7 @@ import {
 import { Button } from "$lib/components/ui/button";
 import { Input } from "$lib/components/ui/input";
 
-type ActiveSection = "general" | "context" | "providers" | "agents" | "token-usage";
+type ActiveSection = "general" | "context" | "providers" | "agents" | "mcp" | "token-usage";
 type Props = {
 	active: ActiveSection;
 	search?: string;
@@ -42,7 +42,7 @@ const sections = [
 				icon: Terminal,
 				key: "providers",
 			},
-			{ label: "MCP", href: "/settings#mcp", icon: MessageSquareText },
+			{ label: "MCP", href: "/settings/mcp", icon: MessageSquareText, key: "mcp" },
 			{
 				label: "Token Usage",
 				href: "/settings/token-usage",
@@ -88,7 +88,7 @@ const sections = [
 						<Button
 							href={item.href}
 							variant="ghost"
-							class={`w-full justify-start gap-2 ${item.key === active ? "bg-white/[0.14] text-white" : "text-neutral-400"}`}
+			class={`w-full justify-start gap-2 ${"key" in item && item.key === active ? "bg-white/[0.14] text-white" : "text-neutral-400"}`}
 						>
 							<Icon class="size-4" />
 							{item.label}

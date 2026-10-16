@@ -27,6 +27,31 @@ export type Project = {
 	createdAt: string;
 };
 
+export type McpInventory = {
+	projectId: string | null;
+	projectName: string | null;
+	generatedAt: string;
+	connectionStatus: "not-observed";
+	coverage: { maxConfigBytes: number; maxServersPerSource: number; maxServers: number; truncated: boolean };
+	sources: Array<{ id: string; runtime: string; scope: string; file: string; status: string; issue?: string }>;
+	servers: Array<{
+		id: string;
+		name: string;
+		runtime: string;
+		scope: string;
+		source: string;
+		ownership: string;
+		transport: string;
+		connectionState: "unknown";
+		enabled: boolean | null;
+		command?: string;
+		argumentCount: number;
+		endpointHost?: string;
+		environmentVariableNames: string[];
+		headerNames: string[];
+	}>;
+};
+
 export type ContextEntry = {
 	id: string;
 	projectId: string | null;
@@ -328,6 +353,8 @@ export async function request<T>(path: string, init: RequestInit = {}) {
 
 export const daemon = {
 	listProjects: () => request<Project[]>("/api/projects"),
+	getMcpInventory: (projectId?: string) =>
+		request<McpInventory>(`/api/mcp/inventory${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
 	getProject: (id: string) => request<Project>(`/api/projects/${id}`),
 	getProjectGit: (id: string) =>
 		request<ProjectGitOverview>(`/api/projects/${id}/git`),
