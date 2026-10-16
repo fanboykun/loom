@@ -29,6 +29,7 @@ export type CliAdapterOptions = {
 		model?: string;
 		thinkingMode?: string;
 		permission?: RuntimePermission;
+		customInstructions?: boolean;
 	}) => Promise<{
 		command: string;
 		args: string[];
@@ -201,6 +202,7 @@ class CliRuntime implements AgentRuntime {
 			model: input.model?.modelID,
 			thinkingMode: input.thinkingMode,
 			permission: input.permission ?? session.permission,
+			customInstructions: !!input.system,
 		});
 		const executable = await findExecutable(command.command);
 		if (!executable)

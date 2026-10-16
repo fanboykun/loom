@@ -23,7 +23,13 @@ export class ClaudeProviderAdapter extends CliProviderAdapter {
 					"reasoning-effort",
 				],
 			},
-			buildPrompt: async ({ prompt, model, thinkingMode, permission }) => ({
+			buildPrompt: async ({
+				prompt,
+				model,
+				thinkingMode,
+				permission,
+				customInstructions,
+			}) => ({
 				command: "claude",
 				env:
 					thinkingMode && thinkingMode !== "default"
@@ -36,8 +42,9 @@ export class ClaudeProviderAdapter extends CliProviderAdapter {
 					"--output-format",
 					"stream-json",
 					"--verbose",
-					"--append-system-prompt-file",
-					promptPath("coding.md"),
+					...(!customInstructions
+						? ["--append-system-prompt-file", promptPath("coding.md")]
+						: []),
 					...(model ? ["--model", model] : []),
 					prompt,
 				],

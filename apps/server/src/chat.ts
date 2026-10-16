@@ -1071,15 +1071,15 @@ export function createChatRoutes(options: {
 		const designInstruction = designNodes.length
 			? `IMPLEMENTATION PRIORITY: The attached Canvas design node(s) are the authoritative visual specification for this request. When the user asks to implement, slice, or recreate them, match their layout, colors, typography, spacing, sizing, and component treatment as closely as possible. Do not replace or restyle the Canvas design to match the existing project's theme; inspect the project only to determine its framework, entry points, and integration needs. Follow the user's requested behavior and scope. Adapt the design to the project theme only if the user explicitly asks for that.`
 			: "";
-		const promptText = [
-			customAgent
-				? `You are the custom agent “${customAgent.label}” (${customAgent.role}).\n${customAgent.roleDescription ?? ""}\n${customAgent.systemInstructions}\n${customAgent.skills
+		const customAgentInstructions = customAgent
+			? `You are the custom agent “${customAgent.label}” (${customAgent.role}).\n${customAgent.roleDescription ?? ""}\n${customAgent.systemInstructions}\n${customAgent.skills
 						.filter((skill) => skill.enabled && skill.allowChat)
 						.map((skill) => `## ${skill.name}\n${skill.instructions}`)
 						.join(
 							"\n\n",
-						)}\n\nFollow the configured agent role and skills while respecting Loom's permission and project-scope policies.`
-				: "",
+					)}\n\nFollow the configured agent role and skills while respecting Loom's permission and project-scope policies.`
+			: "";
+		const promptText = [
 			designInstruction,
 			input.text,
 			designContext ? `Canvas visual reference(s):\n${designContext}` : "",
@@ -1087,14 +1087,7 @@ export function createChatRoutes(options: {
 			.filter(Boolean)
 			.join("\n\n");
 		const openCodeSystemPrompt = [
-			customAgent
-				? `Custom agent: ${customAgent.label} (${customAgent.role})\n${customAgent.roleDescription ?? ""}\n${customAgent.systemInstructions}\n${customAgent.skills
-						.filter((skill) => skill.enabled && skill.allowChat)
-						.map((skill) => `## ${skill.name}\n${skill.instructions}`)
-						.join(
-							"\n\n",
-						)}\n\nRespect the Loom approval policy and project boundary.`
-				: "",
+			customAgentInstructions,
 			designInstruction,
 			designNodes.length
 				? `Attached Canvas nodes: ${designNodes.map((node) => `${node.title} (${node.viewport}): ${node.brief}`).join("; ")}. Inspect the attached HTML files as the visual source of truth.`
@@ -1304,6 +1297,9 @@ export function createChatRoutes(options: {
 				await runtime.prompt({
 					sessionId: created.id,
 					prompt,
+					...(customAgentInstructions
+						? { system: customAgentInstructions }
+						: {}),
 					model: runtimeModel,
 					thinkingMode: input.thinkingMode,
 					...(customAgent
@@ -1368,7 +1364,10 @@ export function createChatRoutes(options: {
 			}),
 		);
 		await request(`/session/${current.id}/prompt_async`, current.directory, {
-			agent: input.agent,
+			// A Loom custom agent already supplies its own system instructions and
+			// runtime. Do not layer an unrelated OpenCode agent (for example build)
+			// on top of it, which duplicates/conflicts with the selected role.
+			agent: customAgent ? undefined : input.agent,
 			...(openCodeSystemPrompt ? { system: openCodeSystemPrompt } : {}),
 			...(openCodeModel
 				? {

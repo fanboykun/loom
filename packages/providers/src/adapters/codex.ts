@@ -19,7 +19,13 @@ export class CodexProviderAdapter extends CliProviderAdapter {
 					"reasoning-effort",
 				],
 			},
-			buildPrompt: async ({ prompt, model, thinkingMode, permission }) => ({
+			buildPrompt: async ({
+				prompt,
+				model,
+				thinkingMode,
+				permission,
+				customInstructions,
+			}) => ({
 				command: "codex",
 				// codex exec may wait for more stdin in non-TTY environments even
 				// when the prompt is an argument. Send EOF explicitly to avoid that.
@@ -37,7 +43,9 @@ export class CodexProviderAdapter extends CliProviderAdapter {
 						? ["--config", `model_reasoning_effort=${thinkingMode}`]
 						: []),
 					...(model ? ["--model", codexModelSlug(model)] : []),
-					`${await readPrompt("coding.md")}\n\n${prompt}`,
+					customInstructions
+						? prompt
+						: `${await readPrompt("coding.md")}\n\n${prompt}`,
 				],
 			}),
 			getAuthStatus: codexAuthStatus,

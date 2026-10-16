@@ -67,6 +67,7 @@ let {
 	customAgents?: Array<{
 		id: string;
 		label: string;
+		allowChat?: boolean;
 		provider: string;
 		modelId: string | null;
 	}>;
@@ -166,6 +167,13 @@ const choices = $derived([
 				a.name.toLowerCase().includes((query ?? "").toLowerCase()),
 		)
 		.map((a) => ({ value: a.name, type: "agent" })),
+	...customAgents
+		.filter(
+			(item) =>
+				item.allowChat !== false &&
+				item.label.toLowerCase().includes((query ?? "").toLowerCase()),
+		)
+		.map((item) => ({ value: item.label, type: "custom-agent", id: item.id })),
 	...results.map((value) => ({ value, type: "file" })),
 ]);
 const selectedModel = $derived(
@@ -399,8 +407,9 @@ function toggleDesign(node: DesignNode) {
 	designNotice = "";
 	selectedDesignIds = [...selectedDesignIds, node.id];
 }
-async function choose(item: { value: string; type: string }) {
+async function choose(item: { value: string; type: string; id?: string }) {
 	if (item.type === "file") files = [...new Set([...files, item.value])];
+	else if (item.type === "custom-agent") customAgentId = item.id ?? "";
 	else agents = [...new Set([...agents, item.value])];
 	draft = `${draft.slice(0, mentionStart)}${draft.slice(cursor)}`;
 	query = null;
@@ -584,7 +593,7 @@ function keydown(event: KeyboardEvent) {
         {#if searching}<p class="p-3 text-xs text-muted-foreground">Searching project files and folders…</p>{:else if searchError}<p role="alert" class="p-3 text-xs text-destructive">{searchError}</p>{:else if !choices.length}<p class="p-3 text-xs text-muted-foreground">No matching files, folders, or agents.</p>{/if}
         {#each choices as item, index}
           <Button id={`mention-${index}`} type="button" role="option" aria-selected={active === index} variant="ghost" class={`h-auto w-full justify-start py-2 text-left text-xs ${active === index ? "bg-accent" : ""}`} onclick={() => choose(item)}>
-            {#if item.type === "agent"}<Bot size={15} />{:else if item.value.endsWith("/")}<Folder size={15} />{:else}<FileIcon size={15} />{/if}<span class="min-w-0 truncate">{item.value}</span><span class="ml-auto text-muted-foreground">{item.type === "agent" ? "agent" : item.value.endsWith("/") ? "folder" : "file"}</span>
+            {#if item.type === "agent" || item.type === "custom-agent"}<Bot size={15} />{:else if item.value.endsWith("/")}<Folder size={15} />{:else}<FileIcon size={15} />{/if}<span class="min-w-0 truncate">{item.value}</span><span class="ml-auto text-muted-foreground">{item.type === "custom-agent" ? "Loom agent" : item.type === "agent" ? "agent" : item.value.endsWith("/") ? "folder" : "file"}</span>
           </Button>
         {/each}
       </div>
