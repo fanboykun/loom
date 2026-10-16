@@ -425,6 +425,7 @@ export function normalizeCliOutput(output: string): string {
 export function parseCliOutput(output: string): {
 	output: string;
 	error?: string;
+	tokens?: NonNullable<RuntimeOutput["tokens"]>;
 	activities: RuntimeActivity[];
 	parts: NonNullable<RuntimeOutput["parts"]>;
 } {
@@ -453,6 +454,7 @@ export function parseCliOutput(output: string): {
 	}
 	let error: string | undefined;
 	let finalResponse: string | undefined;
+	let tokens: NonNullable<RuntimeOutput["tokens"]> | undefined;
 	for (const line of output.split("\n").filter(Boolean)) {
 		try {
 			const event = JSON.parse(line);
@@ -483,6 +485,64 @@ export function parseCliOutput(output: string): {
 						: (event.error?.message ?? event.message);
 				if (typeof message === "string" && message.trim())
 					error = message.trim();
+			}
+			// Codex `exec --json` reports the completed turn's token accounting here.
+			// Keep cached input separate because Loom's shared UI adds it back when
+			// showing context-window occupancy.
+			const usage =
+				event.type === "turn.completed" &&
+				event.usage &&
+				typeof event.usage === "object"
+					? event.usage
+					: event.type === "result" &&
+							event.result?.usage &&
+							typeof event.result.usage === "object"
+						? event.result.usage
+						: undefined;
+			if (usage) {
+				const numeric = (value: unknown) =>
+					typeof value === "number" && Number.isFinite(value) && value >= 0
+						? value
+						: undefined;
+				const rawInput = numeric(usage.input_tokens ?? usage.inputTokens);
+				const cacheRead = numeric(
+					usage.cached_input_tokens ??
+						usage.cache_read_input_tokens ??
+						usage.cacheReadInputTokens,
+				);
+				const cacheWrite = numeric(
+					usage.cache_write_input_tokens ??
+						usage.cache_creation_input_tokens ??
+						usage.cacheWriteInputTokens,
+				);
+				const input =
+					rawInput === undefined
+						? undefined
+						: Math.max(0, rawInput - (cacheRead ?? 0));
+				const outputTokens = numeric(usage.output_tokens ?? usage.outputTokens);
+				const reasoning = numeric(
+					usage.reasoning_output_tokens ??
+						usage.reasoning_tokens ??
+						usage.reasoningOutputTokens,
+				);
+				const total =
+					rawInput === undefined && outputTokens === undefined
+						? undefined
+						: (rawInput ?? 0) + (outputTokens ?? 0);
+				tokens = {
+					...(total !== undefined ? { total } : {}),
+					...(input !== undefined ? { input } : {}),
+					...(outputTokens !== undefined ? { output: outputTokens } : {}),
+					...(reasoning !== undefined ? { reasoning } : {}),
+					...(cacheRead !== undefined || cacheWrite !== undefined
+						? {
+								cache: {
+									...(cacheRead !== undefined ? { read: cacheRead } : {}),
+									...(cacheWrite !== undefined ? { write: cacheWrite } : {}),
+								},
+							}
+						: {}),
+				};
 			}
 			const step = event.step_update;
 			if (step?.step_type === "tool") {
@@ -731,6 +791,7 @@ export function parseCliOutput(output: string): {
 	return {
 		output: (finalResponse ?? text.join("\n")).trim(),
 		error,
+		...(tokens ? { tokens } : {}),
 		activities: [...activities.values()],
 		parts,
 	};

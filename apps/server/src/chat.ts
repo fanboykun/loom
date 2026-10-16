@@ -256,6 +256,7 @@ export function createChatRoutes(options: {
 		if (turn.finished) return;
 		const status = await turn.runtime.status(turn.id);
 		const output = await turn.runtime.readOutput?.(turn.id);
+		if (output?.tokens) turn.assistant.info.tokens = output.tokens;
 		const activityParts: Array<{
 			id: string;
 			part: ProviderMessage["parts"][number];

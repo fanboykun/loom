@@ -10,6 +10,14 @@ export type AgentRunStatus =
 export type RuntimeOutput = {
 	output: string;
 	truncated?: boolean;
+	/** Provider-reported token usage for the completed turn. */
+	tokens?: {
+		total?: number;
+		input?: number;
+		output?: number;
+		reasoning?: number;
+		cache?: { read?: number; write?: number };
+	};
 	activities?: RuntimeActivity[];
 	parts?: Array<
 		| { type: "text"; id: string; text: string }
