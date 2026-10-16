@@ -16,7 +16,7 @@ import {
 import { Button } from "$lib/components/ui/button";
 import { Input } from "$lib/components/ui/input";
 
-type ActiveSection = "general" | "providers" | "agents";
+type ActiveSection = "general" | "providers" | "agents" | "token-usage";
 type Props = {
 	active: ActiveSection;
 	search?: string;
@@ -45,8 +45,9 @@ const sections = [
 			{ label: "MCP", href: "/settings#mcp", icon: MessageSquareText },
 			{
 				label: "Token Usage",
-				href: "/settings#token-usage",
+				href: "/settings/token-usage",
 				icon: WalletCards,
+				key: "token-usage",
 			},
 		],
 	},
