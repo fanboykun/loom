@@ -24,12 +24,14 @@ export class CodexProviderAdapter extends CliProviderAdapter {
 				// when the prompt is an argument. Send EOF explicitly to avoid that.
 				stdin: "",
 				args: [
+					// This is a top-level Codex option; placing it after `exec` makes
+					// current Codex CLI versions reject the invocation as an unknown flag.
+					"--ask-for-approval",
+					permission?.mode === "auto" ? "never" : "on-request",
 					"exec",
 					"--json",
 					"--sandbox",
 					permission?.mode === "read-only" ? "read-only" : "workspace-write",
-					"--ask-for-approval",
-					permission?.mode === "auto" ? "never" : "on-request",
 					...(model ? ["--model", codexModelSlug(model)] : []),
 					`${await readPrompt("coding.md")}\n\n${prompt}`,
 				],

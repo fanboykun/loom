@@ -63,6 +63,34 @@ const sections = [
 ];
 </script>
 
+<div class="sticky top-0 z-20 border-b border-white/10 bg-[#090909]/95 px-3 py-2 backdrop-blur md:hidden">
+	<div class="flex items-center justify-between gap-3">
+		<Button href="/" variant="ghost" size="sm" class="shrink-0 gap-2 px-2 text-neutral-300">
+			<ArrowLeft data-icon="inline-start" />Workspace
+		</Button>
+		<span class="flex min-w-0 items-center gap-2 text-sm font-semibold">
+			<span class="flex size-6 shrink-0 items-center justify-center rounded-md bg-white text-black">L</span>
+			loom · Settings
+		</span>
+	</div>
+	<nav class="mt-2 flex gap-1 overflow-x-auto pb-1" aria-label="Settings sections">
+		{#each sections as section}
+			{#each section.items as item}
+				{@const Icon = item.icon}
+				<Button
+					href={item.href}
+					variant="ghost"
+					size="sm"
+					aria-current={"key" in item && item.key === active ? "page" : undefined}
+					class={`shrink-0 gap-2 ${"key" in item && item.key === active ? "bg-white/[0.14] text-white" : "text-neutral-400"}`}
+				>
+					<Icon data-icon="inline-start" />{item.label}
+				</Button>
+			{/each}
+		{/each}
+	</nav>
+</div>
+
 <aside class="sticky top-0 hidden h-svh w-64 shrink-0 overflow-y-auto border-r border-white/10 px-3 py-4 md:block">
 	<div class="mb-5">
 		<Button href="/" variant="ghost" class="w-full justify-start gap-2 px-2 text-sm font-semibold text-neutral-100">
@@ -74,7 +102,7 @@ const sections = [
 		<span class="flex size-6 items-center justify-center rounded-md bg-white text-black">L</span>
 		loom
 	</div>
-	<label class="relative mt-5 block">
+	<label class="relative mt-5 hidden md:block">
 		<Search class="absolute left-3 top-2.5 size-4 text-neutral-500" />
 		<Input bind:value={search} placeholder="Search settings…" class="h-9 border-white/10 bg-white/[0.04] pl-9 text-xs" />
 	</label>

@@ -484,7 +484,7 @@ function duplicateAgent(agent: Agent) {
 </script>
 
 <svelte:head><title>Agents · Loom</title></svelte:head>
-<div class="min-h-svh bg-[#090909] text-neutral-100"><div class="mx-auto flex min-h-svh max-w-[1600px]"><SettingsSidebar active="agents" bind:search={sidebarSearch} /><main class="min-w-0 flex-1 px-4 py-8 sm:px-8 lg:px-12 lg:py-10"><div class="mx-auto max-w-5xl">
+<div class="min-h-svh bg-[#090909] text-neutral-100"><div class="flex min-h-svh w-full flex-col md:flex-row"><SettingsSidebar active="agents" bind:search={sidebarSearch} /><main class="min-w-0 flex-1 px-4 py-6 sm:px-7 lg:px-10 lg:py-8"><div class="mx-auto max-w-[1320px]">
 	<div class="mb-8 flex flex-wrap items-start justify-between gap-4"><div><p class="mb-2 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Settings · Agents</p><h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">Agents</h1><p class="mt-2 max-w-2xl text-sm text-neutral-500">Create reusable workers for design, coding, planning, and testing. Agents only run when you explicitly call them.</p></div><Button onclick={resetForm}><Plus class="size-4" />Create agent</Button></div>
 	{#if showForm}
 	<AlertDialog.Root bind:open={showForm}>

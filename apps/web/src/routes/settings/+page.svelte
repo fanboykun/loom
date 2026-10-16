@@ -177,11 +177,11 @@ async function deleteWorkspace() {
 <svelte:head><title>Settings · Loom</title></svelte:head>
 
 <div class="min-h-svh bg-[#090909] text-neutral-100">
-	<div class="mx-auto flex min-h-svh max-w-[1500px]">
+	<div class="flex min-h-svh w-full flex-col md:flex-row">
 		<SettingsSidebar active="general" bind:search />
 
-		<main class="min-w-0 flex-1 px-4 py-8 sm:px-8 lg:px-12 lg:py-10">
-			<div class="mx-auto max-w-5xl">
+		<main class="min-w-0 flex-1 px-4 py-6 sm:px-7 lg:px-10 lg:py-8">
+			<div class="mx-auto max-w-[1320px]">
 				<div class="mb-8 flex flex-wrap items-start justify-between gap-4"><div><p class="mb-2 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Workspace</p><h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">General Settings</h1><p class="mt-2 text-sm text-neutral-500">Manage your core Loom workspace preferences and configurations.</p></div><div class="md:hidden"><Button href="/" variant="outline" size="sm"><ChevronLeft class="size-4" />Back</Button></div></div>
 				{#if loading}<div class="rounded-2xl border border-white/10 bg-white/[0.03] p-8 text-sm text-neutral-400">Loading workspace settings…</div>{:else if !projects.length}<div class="rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-10 text-center"><Folder class="mx-auto mb-3 size-8 text-neutral-500" /><h2 class="font-medium">No workspace yet</h2><p class="mt-2 text-sm text-neutral-500">Add a project from the workspace to configure it here.</p><Button href="/" class="mt-5">Open workspace</Button></div>{:else}
 					<div class="mb-4 flex items-center gap-2 overflow-x-auto pb-1"><span class="shrink-0 text-xs text-neutral-500">Workspace</span>{#each filteredProjects as item}<button type="button" class={`shrink-0 rounded-full border px-3 py-1.5 text-xs transition ${item.id === selectedProjectId ? "border-white/25 bg-white/[0.12] text-white" : "border-white/10 text-neutral-500 hover:text-white"}`} onclick={() => selectProject(item.id)}>{item.name}</button>{/each}</div>

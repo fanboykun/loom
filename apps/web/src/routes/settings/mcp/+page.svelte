@@ -60,11 +60,11 @@
 
 <svelte:head><title>MCP · Loom</title></svelte:head>
 
-<div class="min-h-svh bg-[#090909] text-neutral-100">
-	<div class="mx-auto flex min-h-svh max-w-[1500px]">
+<div class="min-h-svh w-full bg-[#090909] text-neutral-100">
+	<div class="flex min-h-svh w-full flex-col md:flex-row">
 		<SettingsSidebar active="mcp" bind:search />
-		<main class="min-w-0 flex-1 px-4 py-8 sm:px-8 lg:px-12 lg:py-10">
-			<div class="mx-auto max-w-6xl">
+		<main class="min-w-0 flex-1 px-4 py-6 sm:px-7 lg:px-10 lg:py-8">
+			<div class="mx-auto max-w-[1320px]">
 				<header class="mb-7 flex flex-wrap items-start justify-between gap-4">
 					<div>
 						<p class="mb-2 text-[11px] font-medium uppercase tracking-[0.2em] text-neutral-500">Agents · Integrations</p>

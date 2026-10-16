@@ -267,8 +267,8 @@
 
 <svelte:head><title>Context Hub · Settings · Loom</title></svelte:head>
 
-<div class="min-h-full bg-[#090909] text-neutral-100">
-	<div class="mx-auto flex min-h-full max-w-[1600px]">
+<div class="min-h-svh w-full bg-[#090909] text-neutral-100">
+	<div class="flex min-h-svh w-full flex-col md:flex-row">
 		<SettingsSidebar active="context" bind:search={sidebarSearch} />
 		<main class="min-w-0 flex-1 px-4 py-6 sm:px-7 lg:px-10 lg:py-8">
 			<div class="mx-auto flex max-w-[1320px] flex-col gap-6">
