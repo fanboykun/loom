@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { atomicJson, dataDirectory } from "@loom/distribution";
 import type { AgentRuntime, ProviderManager } from "@loom/providers";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -12,6 +13,7 @@ import {
 	createWorkspaceFile,
 	listWorkspaceDirectory,
 	readWorkspaceFile,
+	searchWorkspaceEntries,
 	WorkspaceFileError,
 	writeWorkspaceFile,
 } from "./workspace-files";
@@ -23,6 +25,7 @@ const promptSchema = z
 		agent: z.string().optional(),
 		customAgentId: z.string().min(1).optional(),
 		model: z.object({ providerID: z.string(), modelID: z.string() }).optional(),
+		thinkingMode: z.string().min(1).max(100).optional(),
 		files: z.array(z.string()).max(50).default([]),
 		designNodeIds: z.array(z.string().min(1)).max(5).default([]),
 		attachments: z
@@ -104,6 +107,31 @@ type ProviderTurn = {
 	persistedMessages?: string;
 	status: { type: string; message?: string };
 };
+
+function variantIds(
+	value: Array<string | { id?: string }> | Record<string, unknown> | undefined,
+) {
+	if (Array.isArray(value))
+		return value.flatMap((item) =>
+			typeof item === "string"
+				? [item]
+				: typeof item.id === "string"
+					? [item.id]
+					: [],
+		);
+	return value && typeof value === "object" ? Object.keys(value) : [];
+}
+
+function thinkingGuidance(mode: string) {
+	const detail: Record<string, string> = {
+		low: "Keep analysis brief and focus on the quickest reliable solution.",
+		medium:
+			"Balance careful analysis with response speed; verify important steps.",
+		high: "Spend more time analyzing alternatives and checking the result before responding.",
+	};
+	const instruction = detail[mode];
+	return instruction ? `Reasoning preference (${mode}): ${instruction}` : "";
+}
 
 function mergeMessages(
 	previous: ProviderMessage[],
@@ -386,7 +414,14 @@ export function createChatRoutes(options: {
 					name: string;
 					models: Record<
 						string,
-						{ id: string; name: string; limit?: { context?: number } }
+						{
+							id: string;
+							name: string;
+							limit?: { context?: number };
+							variants?:
+								| Array<string | { id?: string }>
+								| Record<string, unknown>;
+						}
 					>;
 				}>;
 				default: Record<string, string>;
@@ -426,6 +461,7 @@ export function createChatRoutes(options: {
 								name: model.name || modelId,
 								provider: provider.name,
 								contextWindow: model.limit?.context,
+								variants: variantIds(model.variants),
 							})),
 				),
 				...normalizedModels,
@@ -869,12 +905,32 @@ export function createChatRoutes(options: {
 	});
 	app.get("/files", async (c) => {
 		const root = await directory(c.req.query("projectId"));
-		return c.json(
-			await request<string[]>(
-				`/find/file?query=${encodeURIComponent(c.req.query("query") ?? "")}&limit=100&dirs=false`,
-				root,
-			),
+		const entries = await searchWorkspaceEntries(
+			root,
+			c.req.query("query") ?? "",
 		);
+		return c.json(entries.map((entry) => entry.path));
+	});
+	const preferencesPath = join(dataDirectory(), "chat-preferences.json");
+	app.get("/preferences", async (c) => {
+		try {
+			const saved = z
+				.object({ favoriteModels: z.array(z.string()).max(100) })
+				.parse(JSON.parse(await readFile(preferencesPath, "utf8")));
+			return c.json(saved);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			return c.json({ favoriteModels: [] as string[] });
+		}
+	});
+	app.put("/preferences", async (c) => {
+		const input = z
+			.object({ favoriteModels: z.array(z.string().min(1).max(500)).max(100) })
+			.parse(await c.req.json());
+		const saved = { favoriteModels: [...new Set(input.favoriteModels)] };
+		await mkdir(dataDirectory(), { recursive: true, mode: 0o700 });
+		await atomicJson(preferencesPath, saved);
+		return c.json(saved);
 	});
 	app.get("/file", async (c) => {
 		const root = await directory(c.req.query("projectId"));
@@ -1066,6 +1122,16 @@ export function createChatRoutes(options: {
 							: requestedModel;
 					})()
 				: undefined;
+		const openCodeVariants =
+			providerId === "opencode" && requestedModel
+				? (cachedCatalog?.models.find(
+						(model) =>
+							model.providerID === "opencode" &&
+							model.modelID === requestedModel.modelID,
+					)?.variants ?? [])
+				: [];
+		const useOpenCodeVariant =
+			!!input.thinkingMode && openCodeVariants.includes(input.thinkingMode);
 		const runtimeModel =
 			providerId && requestedModel
 				? (() => {
@@ -1224,8 +1290,13 @@ export function createChatRoutes(options: {
 				.join("\n\n");
 			const prompt = [
 				context ? `Previous conversation:\n${context}` : "",
+				providerId !== "claude" && providerId !== "codex"
+					? thinkingGuidance(input.thinkingMode ?? "")
+					: "",
 				promptText,
-				files.length ? `Referenced project files:\n${files.join("\n")}` : "",
+				files.length
+					? `Referenced project paths (files or folders):\n${files.join("\n")}`
+					: "",
 			]
 				.filter(Boolean)
 				.join("\n\n");
@@ -1234,6 +1305,7 @@ export function createChatRoutes(options: {
 					sessionId: created.id,
 					prompt,
 					model: runtimeModel,
+					thinkingMode: input.thinkingMode,
 					...(customAgent
 						? {
 								permission: {
@@ -1298,8 +1370,22 @@ export function createChatRoutes(options: {
 		await request(`/session/${current.id}/prompt_async`, current.directory, {
 			agent: input.agent,
 			...(openCodeSystemPrompt ? { system: openCodeSystemPrompt } : {}),
-			...(openCodeModel ? { model: openCodeModel } : {}),
+			...(openCodeModel
+				? {
+						model: {
+							...openCodeModel,
+							...(useOpenCodeVariant && input.thinkingMode
+								? { variant: input.thinkingMode }
+								: {}),
+						},
+					}
+				: {}),
 			parts: [
+				...(input.thinkingMode &&
+				input.thinkingMode !== "default" &&
+				!useOpenCodeVariant
+					? [{ type: "text", text: thinkingGuidance(input.thinkingMode) }]
+					: []),
 				...(input.text ? [{ type: "text", text: input.text }] : []),
 				...designNodes.map((node) => ({
 					type: "file",

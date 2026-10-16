@@ -68,6 +68,8 @@ export type AgentRuntime = {
 		/** Provider-level instructions separated from the user task when supported. */
 		system?: string;
 		model?: RuntimeModel;
+		/** Optional reasoning preference; runtimes map it to native controls when available. */
+		thinkingMode?: string;
 		/** Base64 images (pasted photos, mockups) sent alongside the text. */
 		images?: Array<{ mime: string; data: string }>;
 		/** Tool-permission policy for this run; CLI providers only. */

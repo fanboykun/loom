@@ -131,9 +131,20 @@ let viewMode = $state<ViewMode>(initialView());
 let splitChat = $state(false);
 let splitPreviousPanel = $state<ChatPanelId | null>(null);
 let chatTabs = $state<WorkspaceChatTab[]>([
-	{ id: "chat-tab-1", sessionId: "", projectId: "", label: "New chat", draft: "", model: "", agent: "build", customAgentId: "" },
+	{
+		id: "chat-tab-1",
+		sessionId: "",
+		projectId: "",
+		label: "New chat",
+		draft: "",
+		model: "",
+		agent: "build",
+		customAgentId: "",
+	},
 ]);
 let activeChatTabId = $state("chat-tab-1");
+let draggedChatTabId = $state("");
+let lastSyncedRouteSession = page.url.searchParams.get("session") ?? "";
 let draft = $state("");
 let model = $state("");
 let agent = $state("build");
@@ -641,6 +652,12 @@ async function selectSession(id: string) {
 }
 $effect(() => {
 	const id = page.url.searchParams.get("session") ?? "";
+	const browserId =
+		new URL(window.location.href).searchParams.get("session") ?? "";
+	// A tab change updates history before SvelteKit publishes its shallow route
+	// state. Ignore that stale route snapshot so it cannot reactivate an older tab.
+	if (id !== browserId || id === lastSyncedRouteSession) return;
+	lastSyncedRouteSession = id;
 	if (ready && id !== sessionId) {
 		if (id) {
 			let tab = chatTabs.find((item) => item.sessionId === id);
@@ -902,6 +919,37 @@ function homeUrl(session = "") {
 	const query = params.toString();
 	return `/${query ? `?${query}` : ""}`;
 }
+function updateChatUrl(session = "") {
+	const url = new URL(window.location.href);
+	if (session) url.searchParams.set("session", session);
+	else url.searchParams.delete("session");
+	lastSyncedRouteSession = session;
+	try {
+		// Shallow routing avoids a pending SvelteKit navigation racing with the
+		// active composer when a new tab is submitted immediately after opening.
+		replaceState(url.toString(), {});
+	} catch {
+		// The tab state is already updated; URL synchronization is best effort.
+	}
+}
+function beginChatTabDrag(event: DragEvent, id: string) {
+	draggedChatTabId = id;
+	event.dataTransfer?.setData("text/plain", id);
+	if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+function dropChatTab(event: DragEvent, targetId: string) {
+	event.preventDefault();
+	const sourceId =
+		draggedChatTabId || event.dataTransfer?.getData("text/plain");
+	const from = chatTabs.findIndex((tab) => tab.id === sourceId);
+	const to = chatTabs.findIndex((tab) => tab.id === targetId);
+	draggedChatTabId = "";
+	if (from < 0 || to < 0 || from === to) return;
+	const reordered = [...chatTabs];
+	const [moved] = reordered.splice(from, 1);
+	reordered.splice(to, 0, moved!);
+	chatTabs = reordered;
+}
 function saveActiveChatTab() {
 	const tab = chatTabs.find((item) => item.id === activeChatTabId);
 	if (!tab) return;
@@ -943,7 +991,19 @@ function newChatTab(projectId = selectedProjectId) {
 	sessionLoading = false;
 	error = "";
 	if (window.innerWidth < 768) sidebarOpen = false;
-	void goto(homeUrl());
+	updateChatUrl();
+}
+function startNewChatFromAnswer(answer: string) {
+	const projectId = selectedProjectId;
+	const selectedModelId = model;
+	const selectedAgent = agent;
+	const selectedCustomAgent = customAgentId;
+	newChatTab(projectId);
+	draft = `Continue from this answer:\n\n${answer.trim()}\n\n`;
+	model = selectedModelId;
+	agent = selectedAgent;
+	customAgentId = selectedCustomAgent;
+	saveActiveChatTab();
 }
 async function switchChatTab(id: string) {
 	const next = chatTabs.find((item) => item.id === id);
@@ -955,11 +1015,12 @@ async function switchChatTab(id: string) {
 	saveActiveChatTab();
 	activeChatTabId = next.id;
 	selectedProjectId = next.projectId;
+	sessionId = next.sessionId;
 	draft = next.draft;
 	model = next.model || preferredModel(next.projectId);
 	agent = next.agent;
 	customAgentId = next.customAgentId;
-	await goto(homeUrl(next.sessionId), { replaceState: true });
+	updateChatUrl(next.sessionId);
 	await selectSession(next.sessionId);
 	saveActiveChatTab();
 }
@@ -1015,7 +1076,10 @@ function openSplitChat() {
 	splitChat = true;
 }
 function registerSplitSession(session: ChatSession, projectId: string) {
-	sessions = [{ ...session, projectId }, ...sessions.filter((item) => item.id !== session.id)];
+	sessions = [
+		{ ...session, projectId },
+		...sessions.filter((item) => item.id !== session.id),
+	];
 }
 async function leaveSplitChat(state: {
 	sessionId: string;
@@ -1033,7 +1097,12 @@ async function leaveSplitChat(state: {
 	saveActiveChatTab();
 	let tab = state.sessionId
 		? chatTabs.find((item) => item.sessionId === state.sessionId)
-		: chatTabs.find((item) => item.id === activeChatTabId && !item.sessionId && item.projectId === state.projectId);
+		: chatTabs.find(
+				(item) =>
+					item.id === activeChatTabId &&
+					!item.sessionId &&
+					item.projectId === state.projectId,
+			);
 	if (!tab) {
 		tab = {
 			id: `chat-tab-${crypto.randomUUID()}`,
@@ -1061,11 +1130,11 @@ async function leaveSplitChat(state: {
 	model = state.model;
 	agent = state.agent;
 	customAgentId = state.customAgentId;
-	sessionId = "";
+	sessionId = state.sessionId;
 	conversation = null;
 	optimistic = null;
 	error = "";
-	await goto(homeUrl(state.sessionId), { replaceState: true });
+	updateChatUrl(state.sessionId);
 	await selectSession(state.sessionId);
 	saveActiveChatTab();
 }
@@ -1262,7 +1331,7 @@ async function send(input: Parameters<typeof chat.send>[1]) {
 					questions: [],
 				};
 				saveActiveChatTab();
-				await goto(homeUrl(id), { replaceState: true });
+				updateChatUrl(id);
 			}
 		}
 		await chat.send(id, input);
@@ -1339,7 +1408,8 @@ async function removeSession() {
 		if (deleteTarget.id === sessionId) {
 			deleteSessionOpen = false;
 			deleteTarget = null;
-			await goto(homeUrl());
+			sessionId = "";
+			updateChatUrl();
 			await selectSession("");
 			return;
 		}
@@ -1525,7 +1595,7 @@ async function answer(requestId: string, answers: string[][]) {
         {#each chatTabs as tab (tab.id)}
           {@const isActive = tab.id === activeChatTabId}
           {@const agentLabel = customAgents.find((item) => item.id === tab.customAgentId)?.label}
-          <div class={`group flex h-8 max-w-56 shrink-0 items-center rounded-md border transition ${isActive ? "border-white/15 bg-white/[0.08] text-foreground" : "border-transparent text-muted-foreground hover:bg-white/[0.04]"}`}>
+          <div role="group" aria-label={`Chat tab ${tab.label}`} aria-roledescription="Draggable chat tab" draggable="true" ondragstart={(event) => beginChatTabDrag(event, tab.id)} ondragend={() => draggedChatTabId = ""} ondragover={(event) => event.preventDefault()} ondrop={(event) => dropChatTab(event, tab.id)} class={`group flex h-8 max-w-56 shrink-0 cursor-grab items-center rounded-md border transition active:cursor-grabbing ${draggedChatTabId === tab.id ? "opacity-40" : ""} ${isActive ? "border-white/15 bg-white/[0.08] text-foreground" : "border-transparent text-muted-foreground hover:bg-white/[0.04]"}`}>
             <Button variant="ghost" role="tab" aria-selected={isActive} class="h-7 min-w-0 justify-start gap-2 px-2 text-xs" title={tab.label} onclick={() => void switchChatTab(tab.id)}><MessageSquare size={13} class="shrink-0" /><span class="max-w-40 truncate">{tab.sessionId ? tab.label : agentLabel ?? tab.label}</span>{#if isActive && sending}<span class="size-1.5 shrink-0 animate-pulse rounded-full bg-primary"></span>{/if}</Button>
             <Button variant="ghost" size="icon" class="mr-0.5 size-6 shrink-0 opacity-60 hover:opacity-100" aria-label={`Close ${tab.label}`} title="Close tab" onclick={(event) => { event.stopPropagation(); void closeChatTab(tab.id); }}><X size={12} /></Button>
           </div>
@@ -1538,7 +1608,7 @@ async function answer(requestId: string, answers: string[][]) {
       <div class={`mx-auto flex min-h-full w-full max-w-[740px] flex-col px-5 ${sessionId ? "py-8" : "justify-center py-12"}`}>
         {#if loading || sessionLoading}<div role="status" class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"><LoaderCircle size={17} class="animate-spin" />Loading {loading ? "workspace" : "conversation"}…</div>
         {:else if !sessionId}<section class="relative isolate -mx-5 flex flex-col items-center px-5 pb-10 pt-[8vh] sm:pt-[12vh]"><div class="pointer-events-none absolute left-1/2 top-24 -z-10 h-80 w-[min(42rem,90vw)] -translate-x-1/2 rounded-full bg-cyan-500/[0.035] blur-3xl"></div><div class="w-full max-w-[700px]"><div class="mb-8 text-center"><div aria-hidden="true" class="relative mx-auto mb-6 size-20"><div class="hero-orbit hero-orbit-one"></div><div class="hero-orbit hero-orbit-two"></div><div class="absolute inset-0 grid place-items-center"><div class="hero-core grid size-12 place-items-center rounded-2xl border border-cyan-200/30 bg-cyan-300/[0.1]"><Sparkles size={20} class="text-cyan-200" /></div></div><span class="hero-node hero-node-one"></span><span class="hero-node hero-node-two"></span><span class="hero-node hero-node-three"></span></div><h1 class="text-3xl font-medium tracking-[-0.04em] text-white sm:text-[38px]">Turn ideas into momentum</h1><p class="mx-auto mt-3 max-w-md text-sm leading-6 text-white/45">Bring a little context. We’ll shape the next step together.</p></div></div></section>{/if}
-         {#if sessionId}<div class="space-y-8" aria-live="polite" aria-relevant="additions text">{#each turns as turn (turn.key)}<Turn messages={turn.messages} {sessionId} projectId={selectedProjectId} onfile={showFiles} />{/each}</div>
+         {#if sessionId}<div class="space-y-8" aria-live="polite" aria-relevant="additions text">{#each turns as turn (turn.key)}<Turn messages={turn.messages} {sessionId} projectId={selectedProjectId} onfile={showFiles} onbranch={startNewChatFromAnswer} />{/each}</div>
            {#if busy}<Marker.Root variant="border" class="mt-5 flex items-center"><Marker.Icon><LoaderCircle size={14} class="animate-spin" /></Marker.Icon><Marker.Content>{conversation?.permissions.length ? "Waiting for permission" : conversation?.questions.length ? "Waiting for your answer" : conversation?.status.message || `${providerLabel} is working…`}</Marker.Content></Marker.Root>{/if}
           {#each conversation?.permissions ?? [] as request}<div role="group" aria-label={`Permission required: ${request.permission}`} class="mt-5 space-y-3 rounded-xl border border-amber-500/30 bg-card p-4"><p class="flex items-center gap-2 text-sm font-medium"><ShieldCheck size={16} />Permission required: {request.permission}</p>{#if request.patterns.length}<pre class="overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{request.patterns.join("\n")}</pre>{/if}<div class="flex flex-wrap gap-2"><Button size="sm" disabled={permissionReplying === request.id} onclick={() => permission(request.id, "once")}>Accept once</Button><Button variant="outline" size="sm" disabled={permissionReplying === request.id} onclick={() => permission(request.id, "always")}>Always allow</Button><Button variant="ghost" size="sm" disabled={permissionReplying === request.id} onclick={() => permission(request.id, "reject")}>Decline</Button></div></div>{/each}
           {#each conversation?.questions ?? [] as question}<div class="mt-5"><QuestionCard {question} onanswer={(answers) => answer(question.id, answers)} /></div>{/each}

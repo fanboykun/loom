@@ -193,6 +193,30 @@ export async function listWorkspaceDirectory(root: string, directory: string) {
 	};
 }
 
+/** Search visible workspace entries without following symlinks or entering ignored paths. */
+export async function searchWorkspaceEntries(root: string, query: string) {
+	const needle = query.trim().toLocaleLowerCase();
+	const pending = [""];
+	const matches: WorkspaceFileEntry[] = [];
+	let visited = 0;
+	while (pending.length && visited < 500 && matches.length < 100) {
+		const directory = pending.shift()!;
+		visited += 1;
+		const result = await listWorkspaceDirectory(root, directory);
+		for (const entry of result.entries) {
+			if (entry.type === "directory" && pending.length < 500)
+				pending.push(entry.path);
+			if (!needle || entry.path.toLocaleLowerCase().includes(needle))
+				matches.push(entry);
+			if (matches.length >= 100) break;
+		}
+	}
+	return matches.map((entry) => ({
+		...entry,
+		path: entry.type === "directory" ? `${entry.path}/` : entry.path,
+	}));
+}
+
 export async function readWorkspaceFile(root: string, relativePath: string) {
 	const { path, parts } = await resolveInside(root, relativePath);
 	if (

@@ -4,6 +4,7 @@ import {
 	ChevronDown,
 	Copy,
 	FileCode,
+	MessageSquarePlus,
 	PanelsTopLeft,
 	Pencil,
 	Terminal,
@@ -28,11 +29,13 @@ let {
 	sessionId,
 	projectId,
 	onfile,
+	onbranch,
 }: {
 	messages: ChatMessage[];
 	sessionId: string;
 	projectId: string;
 	onfile: (path: string) => void;
+	onbranch?: (answer: string) => void;
 } = $props();
 
 const role = $derived(messages[0]?.info.role ?? "assistant");
@@ -63,6 +66,12 @@ const modelTone = $derived(
 );
 const modelID = $derived(messages.find((m) => m.info.modelID)?.info.modelID);
 const time = $derived(first ? first.info.time.created : Date.now());
+const completedAt = $derived(messages.at(-1)?.info.time.completed);
+const elapsed = $derived(
+	completedAt !== undefined && first
+		? Math.max(0, completedAt - first.info.time.created)
+		: null,
+);
 const error = $derived(messages.find((m) => m.info.error)?.info.error);
 const responseText = $derived(
 	messages
@@ -230,10 +239,21 @@ function kindOf(part: ChatPart): ToolKind {
 	const name = `${part.tool ?? ""} ${part.state?.title ?? ""}`.toLowerCase();
 	if (/shell|bash|command|exec/.test(name)) return "shell";
 	if (/search|grep|glob|find|list/.test(name)) return "search";
-	if (/read|view|open|cat/.test(name)) return "read";
+	const metadata = part.state?.metadata as
+		| { filediff?: unknown; files?: unknown[] }
+		| undefined;
+	if (metadata?.filediff || metadata?.files?.length) return "edit";
 	if (/edit|write|patch|apply|file_change|create|delete|replace/.test(name))
 		return "edit";
+	if (/read|view|open|cat/.test(name)) return "read";
 	return "other";
+}
+function formatDuration(milliseconds: number | null) {
+	if (milliseconds === null) return "";
+	const seconds = Math.floor(milliseconds / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	return `${minutes}m ${seconds % 60}s`;
 }
 function commandOf(part: ChatPart) {
 	const input = part.state?.input as Record<string, unknown> | undefined;
@@ -312,7 +332,7 @@ async function copy() {
 		<span class="font-medium text-foreground">{role === "user" ? "You" : providerLabel}</span>
 		{#if agent}<span>{agent}</span>{/if}
 		{#if modelID}<Badge variant="outline" class={`model-badge model-badge--${modelTone} max-w-64 truncate`}>{modelID}</Badge>{/if}
-		<time class="ml-auto shrink-0">{new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+		{#if role === "user"}<time class="ml-auto shrink-0">{new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{/if}
 	</div>
 	{#if role === "user"}
 		{#each messages as message (message.info.id)}
@@ -345,9 +365,9 @@ async function copy() {
 						{@const kind = kindOf(part)}
 						{@const stats = kind === "edit" ? diffStats(part) : null}
 						{@const file = fileOf(part)}
-						<div class="my-2 overflow-hidden rounded-lg border bg-card/50">
+						<div class="my-1 overflow-hidden rounded-lg border bg-card/30 transition-colors hover:bg-card/50">
 							<details>
-								<summary class="flex cursor-pointer list-none items-center gap-2 p-3 text-xs [&::-webkit-details-marker]:hidden">
+								<summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-xs [&::-webkit-details-marker]:hidden">
 					{#if kind === "shell"}<Terminal size={14} class="shrink-0 text-muted-foreground" />
 					{:else if kind === "read" || kind === "search"}<FileCode size={14} class="shrink-0 text-muted-foreground" />
 					{:else if kind === "edit"}<Pencil size={14} class="shrink-0 text-muted-foreground" />
@@ -397,6 +417,12 @@ async function copy() {
 			{/each}
 			{#if error}<p class="mt-3 rounded-lg border border-destructive/30 p-3 text-sm text-destructive" role="alert">{error.data?.message || error.name}</p>{/if}
 		</div>
-		{#if canCopyResponse}<Button variant="ghost" size="sm" class="mt-1 text-xs text-muted-foreground" onclick={copy}>{#if copied}<Check size={13} />{:else}<Copy size={13} />{/if}{copied ? "Copied" : "Copy response"}</Button>{/if}
+		{#if canCopyResponse}
+			<div class="mt-3 flex flex-wrap items-center gap-1 border-t border-white/[0.07] pt-2 text-xs text-muted-foreground">
+				<time class="mr-auto tabular-nums">{formatDuration(elapsed)}{elapsed !== null ? " · " : ""}{new Date(completedAt ?? time).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time>
+				{#if onbranch}<Button variant="ghost" size="sm" class="h-7 gap-1.5 text-xs" onclick={() => onbranch(responseText)} title="Start a new chat from this answer"><MessageSquarePlus size={13} />New session from answer</Button>{/if}
+				<Button variant="ghost" size="sm" class="h-7 gap-1.5 text-xs" onclick={copy}>{#if copied}<Check size={13} />{:else}<Copy size={13} />{/if}{copied ? "Copied" : "Copy response"}</Button>
+			</div>
+		{/if}
 	{/if}
 </article>

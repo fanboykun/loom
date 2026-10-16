@@ -20,10 +20,15 @@ export class ClaudeProviderAdapter extends CliProviderAdapter {
 					"system-prompt",
 					"diff",
 					"models",
+					"reasoning-effort",
 				],
 			},
-			buildPrompt: async ({ prompt, model, permission }) => ({
+			buildPrompt: async ({ prompt, model, thinkingMode, permission }) => ({
 				command: "claude",
+				env:
+					thinkingMode && thinkingMode !== "default"
+						? { CLAUDE_CODE_EFFORT_LEVEL: thinkingMode }
+						: undefined,
 				args: [
 					"--print",
 					"--permission-mode",

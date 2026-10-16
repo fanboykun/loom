@@ -96,6 +96,7 @@ export type Model = {
 	providerId?: string;
 	connectionId?: string;
 	capabilities?: string[];
+	variants?: string[];
 	contextWindow?: number;
 	designSupported?: boolean;
 	openCodeProviderID?: string;
@@ -165,6 +166,7 @@ export const chat = {
 			agent?: string;
 			customAgentId?: string;
 			model?: { providerID: string; modelID: string };
+			thinkingMode?: string;
 			files: string[];
 			attachments?: ChatAttachment[];
 			designNodeIds?: string[];
@@ -203,6 +205,12 @@ export const chat = {
 		request<string[]>(
 			`${root}/files?${new URLSearchParams({ projectId, query })}`,
 		),
+	preferences: () => request<{ favoriteModels: string[] }>(`${root}/preferences`),
+	savePreferences: (favoriteModels: string[]) =>
+		request<{ favoriteModels: string[] }>(`${root}/preferences`, {
+			method: "PUT",
+			body: JSON.stringify({ favoriteModels }),
+		}),
 	file: (projectId: string, path: string) =>
 		request<{ type: string; content: string; encoding?: string }>(
 			`${root}/file?${new URLSearchParams({ projectId, path })}`,

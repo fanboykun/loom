@@ -27,12 +27,14 @@ export type CliAdapterOptions = {
 	buildPrompt: (input: {
 		prompt: string;
 		model?: string;
+		thinkingMode?: string;
 		permission?: RuntimePermission;
 	}) => Promise<{
 		command: string;
 		args: string[];
 		/** Optional stdin payload. Supplying an empty string sends EOF immediately. */
 		stdin?: string;
+		env?: Record<string, string>;
 	}>;
 	getAuthStatus: () => Promise<AuthStatus>;
 	listModels?: () => Promise<AgentModel[]>;
@@ -185,6 +187,7 @@ class CliRuntime implements AgentRuntime {
 		prompt: string;
 		system?: string;
 		model?: { providerID: string; modelID: string };
+		thinkingMode?: string;
 		permission?: RuntimePermission;
 	}): Promise<void> {
 		const session = this.requireSession(input.sessionId);
@@ -196,6 +199,7 @@ class CliRuntime implements AgentRuntime {
 				? `${input.system.trim()}\n\n---\n\n${input.prompt}`
 				: input.prompt,
 			model: input.model?.modelID,
+			thinkingMode: input.thinkingMode,
 			permission: input.permission ?? session.permission,
 		});
 		const executable = await findExecutable(command.command);
@@ -211,7 +215,7 @@ class CliRuntime implements AgentRuntime {
 		const child = spawn(executable, command.args, {
 			cwd: session.cwd,
 			stdio: [command.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-			env: { ...process.env, ...session.permission?.env },
+			env: { ...process.env, ...session.permission?.env, ...command.env },
 			windowsHide: true,
 		});
 		session.process = child;

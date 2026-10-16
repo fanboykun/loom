@@ -6,15 +6,17 @@ import {
 	Check,
 	ChevronDown,
 	File as FileIcon,
+	Folder,
 	Image as ImageIcon,
 	LoaderCircle,
 	PanelsTopLeft,
 	Plus,
+	Sparkles,
 	Square,
 	Star,
 	X,
 } from "@lucide/svelte";
-import { tick } from "svelte";
+import { onMount, tick } from "svelte";
 import { type Catalog, type ChatAttachment, type Model, chat } from "$lib/chat";
 import { Badge } from "$lib/components/ui/badge";
 import { Button } from "$lib/components/ui/button";
@@ -55,6 +57,7 @@ let {
 		agent?: string;
 		customAgentId?: string;
 		model?: { providerID: string; modelID: string };
+		thinkingMode?: string;
 	}) => Promise<boolean>;
 	onstop: () => void;
 	draft?: string;
@@ -88,6 +91,7 @@ let attachmentOpen = $state(false);
 let modelOpen = $state(false);
 let modelSearch = $state("");
 let query = $state<string | null>(null);
+let mentionStyle = $state("");
 let results = $state<string[]>([]);
 let searching = $state(false);
 let searchError = $state("");
@@ -96,6 +100,7 @@ let mentionStart = 0;
 let cursor = 0;
 let previousProject = "";
 let sending = $state(false);
+let thinkingMode = $state("default");
 const favoriteStorageKey = "loom.chat.favoriteModels";
 const recentStorageKey = "loom.chat.recentModels";
 function readModelKeys(key: string): string[] {
@@ -103,7 +108,11 @@ function readModelKeys(key: string): string[] {
 	try {
 		const value: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
 		return Array.isArray(value)
-			? [...new Set(value.filter((item): item is string => typeof item === "string"))].slice(0, 12)
+			? [
+					...new Set(
+						value.filter((item): item is string => typeof item === "string"),
+					),
+				].slice(0, 12)
 			: [];
 	} catch {
 		return [];
@@ -111,6 +120,34 @@ function readModelKeys(key: string): string[] {
 }
 let favoriteModelIds = $state(readModelKeys(favoriteStorageKey));
 let recentModelIds = $state(readModelKeys(recentStorageKey));
+let favoriteSave = Promise.resolve();
+let favoriteRevision = 0;
+onMount(() => {
+	const repositionMention = () => updateMentionPosition();
+	window.addEventListener("resize", repositionMention);
+	document.addEventListener("scroll", repositionMention, true);
+	void (async () => {
+		try {
+			const revision = favoriteRevision;
+			const saved = await chat.preferences();
+			if (revision !== favoriteRevision) return;
+			if (saved.favoriteModels.length) favoriteModelIds = saved.favoriteModels;
+			else if (favoriteModelIds.length) {
+				await chat.savePreferences(favoriteModelIds);
+			}
+			localStorage.setItem(
+				favoriteStorageKey,
+				JSON.stringify(favoriteModelIds),
+			);
+		} catch {
+			// Keep this browser's saved favorites available if the daemon is offline.
+		}
+	})();
+	return () => {
+		window.removeEventListener("resize", repositionMention);
+		document.removeEventListener("scroll", repositionMention, true);
+	};
+});
 function thumbnailStyle(node: DesignNode, boxWidth: number, boxHeight: number) {
 	const frame =
 		node.viewport === "mobile"
@@ -145,7 +182,10 @@ function modelsForKeys(keys: string[]) {
 const favoriteModels = $derived(modelsForKeys(favoriteModelIds));
 const recentModels = $derived(modelsForKeys(recentModelIds));
 const providerGroups = $derived.by(() => {
-	const groups = new Map<string, { id: string; label: string; models: Model[] }>();
+	const groups = new Map<
+		string,
+		{ id: string; label: string; models: Model[] }
+	>();
 	for (const item of catalog.models) {
 		const id = item.providerID;
 		let group = groups.get(id);
@@ -157,7 +197,7 @@ const providerGroups = $derived.by(() => {
 					displayName && displayName.toLowerCase() !== id.toLowerCase()
 						? `${displayName} · ${id}`
 						: id,
-					models: [],
+				models: [],
 			};
 			groups.set(id, group);
 		}
@@ -175,6 +215,7 @@ function providerTone(providerID: string) {
 	return "default";
 }
 function toggleFavorite(item: Model) {
+	favoriteRevision += 1;
 	const key = modelKey(item);
 	favoriteModelIds = favoriteModelIds.includes(key)
 		? favoriteModelIds.filter((id) => id !== key)
@@ -182,11 +223,20 @@ function toggleFavorite(item: Model) {
 	try {
 		localStorage.setItem(favoriteStorageKey, JSON.stringify(favoriteModelIds));
 	} catch {}
+	favoriteSave = favoriteSave
+		.then(() => chat.savePreferences([...favoriteModelIds]))
+		.then(
+			() => {},
+			() => {},
+		);
 }
 function chooseModel(item: Model) {
 	const key = modelKey(item);
 	model = key;
-	recentModelIds = [key, ...recentModelIds.filter((id) => id !== key)].slice(0, 8);
+	recentModelIds = [key, ...recentModelIds.filter((id) => id !== key)].slice(
+		0,
+		8,
+	);
 	try {
 		localStorage.setItem(recentStorageKey, JSON.stringify(recentModelIds));
 	} catch {}
@@ -227,6 +277,18 @@ const visibleProviderGroups = $derived(
 const selectedCustomAgent = $derived(
 	customAgents.find((item) => item.id === customAgentId),
 );
+const supportsThinkingMode = $derived(true);
+const thinkingModes = $derived(
+	selectedModel?.providerID === "opencode" && selectedModel.variants?.length
+		? selectedModel.variants
+		: supportsThinkingMode
+			? ["low", "medium", "high"]
+			: [],
+);
+$effect(() => {
+	if (thinkingMode !== "default" && !thinkingModes.includes(thinkingMode))
+		thinkingMode = "default";
+});
 function customAgentModelLabel(item: NonNullable<typeof selectedCustomAgent>) {
 	if (!item.modelId) return `${item.provider} / default`;
 	const shortId = item.modelId.startsWith(`${item.provider}/`)
@@ -285,12 +347,28 @@ $effect(() => {
 		clearTimeout(timer);
 	};
 });
-function input() {
-	if (!textarea) return;
-	cursor = textarea.selectionStart;
-	const match = draft.slice(0, cursor).match(/(?:^|\s)@([^\s@]*)$/);
+function input(event?: Event) {
+	const element =
+		event?.currentTarget instanceof HTMLTextAreaElement
+			? event.currentTarget
+			: textarea;
+	if (!element) return;
+	cursor = element.selectionStart;
+	const match = element.value.slice(0, cursor).match(/(?:^|\s)@([^\s@]*)$/);
 	query = match ? match[1] : null;
-	if (match) mentionStart = cursor - match[1].length - 1;
+	if (match) {
+		mentionStart = cursor - match[1].length - 1;
+		updateMentionPosition();
+	} else {
+		mentionStyle = "";
+	}
+}
+function updateMentionPosition() {
+	if (query === null || !textarea) return;
+	const rect = textarea.getBoundingClientRect();
+	const showAbove = rect.top > 260;
+	const top = showAbove ? rect.top - 8 : rect.bottom + 8;
+	mentionStyle = `position:fixed;z-index:1000;left:${Math.max(8, rect.left)}px;top:${top}px;width:min(${rect.width}px,calc(100vw - 16px));transform:${showAbove ? "translateY(-100%)" : "none"}`;
 }
 async function loadDesigns() {
 	if (!projectId || loadingDesigns) return;
@@ -416,6 +494,7 @@ async function send() {
 						modelID: selectedModel.modelID,
 					}
 				: undefined,
+			thinkingMode: supportsThinkingMode ? thinkingMode : undefined,
 		});
 		if (ok) {
 			draft = "";
@@ -497,15 +576,15 @@ function keydown(event: KeyboardEvent) {
 		</Button>
 	</div>
 {/snippet}
-<form onsubmit={(event) => { event.preventDefault(); void send(); }} class="relative overflow-hidden rounded-2xl border border-white/[0.14] bg-[#191b1e] shadow-[0_18px_70px_rgba(0,0,0,0.3)] transition-colors focus-within:border-cyan-300/30">
+<form onsubmit={(event) => { event.preventDefault(); void send(); }} class="relative rounded-2xl border border-white/[0.14] bg-[#191b1e] shadow-[0_18px_70px_rgba(0,0,0,0.3)] transition-colors focus-within:border-cyan-300/30">
   {#if query !== null}
-    <div class="absolute bottom-full left-0 z-30 mb-2 w-full overflow-hidden rounded-xl border bg-popover shadow-xl">
+    <div style={mentionStyle} class="overflow-hidden rounded-xl border bg-popover shadow-xl">
       <div class="flex items-center justify-between border-b px-3 py-2 text-xs text-muted-foreground"><span>Files & agents · {choices.length} results</span><span>↑ ↓ select · Enter attach · Esc close</span></div>
       <div class="max-h-64 overflow-y-auto p-1" role="listbox" aria-label="Files and agents" id="mention-list">
-        {#if searching}<p class="p-3 text-xs text-muted-foreground">Searching project files…</p>{:else if searchError}<p role="alert" class="p-3 text-xs text-destructive">{searchError}</p>{:else if !choices.length}<p class="p-3 text-xs text-muted-foreground">No matching files or agents.</p>{/if}
+        {#if searching}<p class="p-3 text-xs text-muted-foreground">Searching project files and folders…</p>{:else if searchError}<p role="alert" class="p-3 text-xs text-destructive">{searchError}</p>{:else if !choices.length}<p class="p-3 text-xs text-muted-foreground">No matching files, folders, or agents.</p>{/if}
         {#each choices as item, index}
           <Button id={`mention-${index}`} type="button" role="option" aria-selected={active === index} variant="ghost" class={`h-auto w-full justify-start py-2 text-left text-xs ${active === index ? "bg-accent" : ""}`} onclick={() => choose(item)}>
-            {#if item.type === "agent"}<Bot size={15} />{:else}<FileIcon size={15} />{/if}<span class="min-w-0 truncate">{item.value}</span><span class="ml-auto text-muted-foreground">{item.type}</span>
+            {#if item.type === "agent"}<Bot size={15} />{:else if item.value.endsWith("/")}<Folder size={15} />{:else}<FileIcon size={15} />{/if}<span class="min-w-0 truncate">{item.value}</span><span class="ml-auto text-muted-foreground">{item.type === "agent" ? "agent" : item.value.endsWith("/") ? "folder" : "file"}</span>
           </Button>
         {/each}
       </div>
@@ -536,7 +615,8 @@ function keydown(event: KeyboardEvent) {
       </Popover.Root>
 
       {#if showAgents}<Select.Root type="single" bind:value={agent}><Select.Trigger class="h-8 w-auto gap-1 rounded-lg border-0 bg-transparent px-2 text-xs text-white/65 shadow-none transition hover:bg-white/[0.06]" aria-label="Select agent">{agent}</Select.Trigger><Select.Content>{#each catalog.agents.filter((a) => a.mode !== "subagent") as item}<Select.Item value={item.name}>{item.name}</Select.Item>{/each}</Select.Content></Select.Root>{/if}
-      {#if customAgents.length}<Select.Root type="single" bind:value={customAgentId}><Select.Trigger class="h-8 w-auto gap-1 rounded-lg border-0 bg-transparent px-2 text-xs text-white/65 shadow-none transition hover:bg-white/[0.06]" aria-label="Select custom agent">{customAgents.find((item) => item.id === customAgentId)?.label ?? "Custom agent"}</Select.Trigger><Select.Content><Select.Item value="">Default agent</Select.Item>{#each customAgents as item}<Select.Item value={item.id}>{item.label}</Select.Item>{/each}</Select.Content></Select.Root>{/if}
+      {#if supportsThinkingMode}<Select.Root type="single" bind:value={thinkingMode}><Select.Trigger class="h-8 w-auto gap-1 rounded-lg border-0 bg-transparent px-2 text-xs text-white/65 shadow-none transition hover:bg-white/[0.06]" aria-label="Thinking mode">{thinkingMode === "default" ? "Thinking" : thinkingMode}</Select.Trigger><Select.Content><Select.Group><Select.Label>Thinking</Select.Label><Select.Item value="default">Default</Select.Item>{#each thinkingModes as mode}<Select.Item value={mode}>{mode[0]!.toUpperCase() + mode.slice(1)}</Select.Item>{/each}</Select.Group></Select.Content></Select.Root>{/if}
+      {#if customAgents.length}<Select.Root type="single" bind:value={customAgentId}><Select.Trigger class="ml-1 h-8 w-auto gap-1 rounded-lg border-0 border-l border-white/10 bg-transparent px-2 text-xs text-white/65 shadow-none transition hover:bg-white/[0.06]" aria-label="Select custom agent">{customAgents.find((item) => item.id === customAgentId)?.label ?? "Custom agent"}</Select.Trigger><Select.Content><Select.Item value="">Default agent</Select.Item>{#each customAgents as item}<Select.Item value={item.id}>{item.label}</Select.Item>{/each}</Select.Content></Select.Root>{/if}
       {#if busy}<Button type="button" size="icon" variant="secondary" class="rounded-full" aria-label="Stop response" title="Stop response" onclick={onstop}><Square size={14} /></Button>{:else}<Button type="submit" size="icon" class="size-9 rounded-full bg-white/65 text-[#191b1e] transition hover:bg-white" aria-label="Send message" title="Send message" disabled={disabled || sending || (!draft.trim() && !files.length && !attachments.length && !selectedDesignIds.length)}>{#if sending}<LoaderCircle size={16} class="animate-spin" />{:else}<ArrowUp size={17} />{/if}</Button>{/if}
     </div>
   </div>
