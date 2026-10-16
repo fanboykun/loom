@@ -1265,6 +1265,11 @@ async function answer(requestId: string, answers: string[][]) {
                 {:else if !sessionId}<p class="mt-3 text-[11px] leading-5 text-muted-foreground">Usage totals start at 0 and fill in when the provider returns token metadata.</p>
                 {:else}<p class="mt-3 text-[11px] leading-5 text-muted-foreground">Provider usage details are unavailable until a response includes token metadata.</p>{/if}
               </section>
+              <section class="rounded-lg border bg-card/50 p-3">
+                <p class="text-xs font-medium">Context library</p>
+                <p class="mt-1 text-[11px] leading-5 text-muted-foreground">Manage scoped knowledge, rules, skills, and approved memory for this workspace.</p>
+                <a class="mt-3 inline-flex h-8 items-center rounded-md border px-3 text-xs transition hover:bg-accent" href={`/settings/context?projectId=${encodeURIComponent(selectedProjectId)}`}>Open Context Hub</a>
+              </section>
             </div>
           {:else if activePanel === "git"}
             {#if panelLoading && !gitOverview}<div class="flex items-center gap-2 py-8 text-xs text-muted-foreground"><LoaderCircle size={14} class="animate-spin" />Reading repository…</div>

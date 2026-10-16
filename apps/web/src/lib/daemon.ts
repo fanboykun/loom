@@ -27,6 +27,52 @@ export type Project = {
 	createdAt: string;
 };
 
+export type ContextEntry = {
+	id: string;
+	projectId: string | null;
+	kind: "knowledge" | "rule" | "skill" | "memory";
+	title: string;
+	description: string;
+	content: string;
+	scope: "global" | "project";
+	sourceKind: string;
+	sourceRef: string | null;
+	nativeRuntime: string | null;
+	compatibility: string;
+	status: string;
+	enabledInLoom: boolean;
+	surfaces: string[];
+	pathGlobs: string[];
+	tags: string[];
+	contentHash: string;
+	currentVersion: number;
+	createdAt: string;
+	updatedAt: string;
+};
+
+export type NativeContextSkill = {
+	id: string;
+	name: string;
+	description: string;
+	content: string;
+	valid: boolean;
+	issues: string[];
+	compatibility: string[];
+	origins: Array<{ source: string; runtimeId: string; scope: string }>;
+};
+
+export type ContextSkillDiscovery = {
+	projectId: string | null;
+	coverage: { maxDirectoriesPerSource: number; maxDiscoveredSkills: number; maxSkillBytes: number; truncatedSources: number };
+	sources: Array<{ id: string; label: string; runtimeId: string; scope: string; status: string; issue?: string; truncated?: boolean }>;
+	skills: NativeContextSkill[];
+};
+
+export type ContextMemoryHistory = {
+	decisions: Array<{ id: string; version: number; proposedBy: string; decidedBy: string | null; decision: string; createdAt: string }>;
+	evidence: Array<{ id: string; sourceType: string; sourceId: string; sourceHash: string | null; verificationStatus: string; createdAt: string }>;
+};
+
 export type ProjectGitOverview = {
 	branch: string;
 	defaultBranch: string;
@@ -405,6 +451,34 @@ export const daemon = {
 		request<Array<Record<string, unknown>>>(
 			`/api/agents${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
 		),
+	listContextEntries: (projectId?: string) =>
+		request<ContextEntry[]>(
+			`/api/context/entries${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+		),
+	discoverContextSkills: (projectId?: string) =>
+		request<ContextSkillDiscovery>(
+			`/api/context/discover${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+		),
+	createContextEntry: (input: Record<string, unknown>) =>
+		request<ContextEntry>("/api/context/entries", {
+			method: "POST",
+			body: JSON.stringify(input),
+		}),
+	updateContextEntry: (id: string, input: Record<string, unknown>) =>
+		request<ContextEntry>(`/api/context/entries/${encodeURIComponent(id)}`, {
+			method: "PUT",
+			body: JSON.stringify(input),
+		}),
+	deleteContextEntry: (id: string) =>
+		request<void>(`/api/context/entries/${encodeURIComponent(id)}`, {
+			method: "DELETE",
+		}),
+	listContextVersions: (id: string) =>
+		request<Array<{ id: string; version: number; content: string; contentHash: string; metadata: string; createdAt: string }>>(
+			`/api/context/entries/${encodeURIComponent(id)}/versions`,
+		),
+	getContextMemoryHistory: (id: string) =>
+		request<ContextMemoryHistory>(`/api/context/entries/${encodeURIComponent(id)}/memory-history`),
 	getAgentPromptPresets: () =>
 		request<Record<string, string>>("/api/agents/prompt-presets"),
 	createCustomAgent: (input: Record<string, unknown>) =>
