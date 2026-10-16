@@ -270,7 +270,8 @@ const contextModel = $derived(
 );
 const contextTokens = $derived(
 	(latestUsageMessage?.info.tokens?.input ?? 0) +
-		(latestUsageMessage?.info.tokens?.cache?.read ?? 0),
+		(latestUsageMessage?.info.tokens?.cache?.read ?? 0) +
+		(latestUsageMessage?.info.tokens?.cache?.write ?? 0),
 );
 const contextPercent = $derived(
 	contextModel?.contextWindow

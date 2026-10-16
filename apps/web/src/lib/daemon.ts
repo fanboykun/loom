@@ -285,6 +285,9 @@ export type SchedulerState = {
 const tokenKey = "loom.daemon.token";
 
 export function serverUrl() {
+	// Browser API traffic is same-origin in development (Vite proxy) and
+	// production. Keep the direct URL for server-side rendering in dev.
+	if (dev && typeof window !== "undefined") return "";
 	return dev ? (PUBLIC_SERVER_URL || "/").replace(/\/$/, "") : "";
 }
 

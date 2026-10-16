@@ -18,6 +18,8 @@ export type RuntimeOutput = {
 		reasoning?: number;
 		cache?: { read?: number; write?: number };
 	};
+	/** Provider-reported cost, when the CLI includes it. */
+	cost?: number;
 	activities?: RuntimeActivity[];
 	parts?: Array<
 		| { type: "text"; id: string; text: string }

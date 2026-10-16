@@ -51,7 +51,9 @@ function getServerUrl(url: string) {
 	return `http://localhost:3000${normalized}`;
 }
 export const link = new RPCLink({
-	url: `${getServerUrl(dev ? PUBLIC_SERVER_URL || "/" : "/")}/rpc`,
+	url: `${getServerUrl(
+		dev && typeof window === "undefined" ? PUBLIC_SERVER_URL || "/" : "/",
+	)}/rpc`,
 	async fetch(url, options) {
 		const headers = new Headers(url instanceof Request ? url.headers : undefined);
 		headers.set("Authorization", `Bearer ${await provisionDaemonToken()}`);

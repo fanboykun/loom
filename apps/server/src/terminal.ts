@@ -26,6 +26,7 @@ export type TerminalSession = {
 	exitedAt?: string;
 	exitCode?: number;
 	error?: string;
+	interrupted?: boolean;
 };
 
 type PtyProcess = import("bun-pty").IPty;
@@ -110,10 +111,14 @@ export class TerminalManager {
 				const item = row as { metadata?: TerminalSession; cwd?: string };
 				const value = item?.metadata;
 				if (!value || typeof value.id !== "string" || typeof value.projectId !== "string" || typeof item.cwd !== "string" || !validDimensions(value.cols, value.rows)) continue;
-				const interrupted = ["creating", "running", "restarting"].includes(value.status);
+				const interrupted = Boolean(
+					value.interrupted ||
+					["creating", "running", "restarting"].includes(value.status),
+				);
 				const metadata: TerminalSession = {
 					...value,
 					status: "exited",
+					interrupted,
 					exitedAt: value.exitedAt ?? new Date().toISOString(),
 					...(interrupted ? { error: "Terminal was interrupted when the Loom daemon stopped." } : {}),
 				};
@@ -318,6 +323,7 @@ export class TerminalManager {
 			session.metadata.exitCode = undefined;
 			session.metadata.exitedAt = undefined;
 			session.metadata.error = undefined;
+			session.metadata.interrupted = false;
 			session.metadata.status = "creating";
 			session.history = []; session.historyBytes = 0; session.sequence = 0;
 			await this.start(session);

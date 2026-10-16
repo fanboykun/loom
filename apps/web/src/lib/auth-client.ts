@@ -1,5 +1,6 @@
 import { createAuthClient } from "better-auth/svelte";
 import { PUBLIC_SERVER_URL } from "$app/env/public";
+import { dev } from "$app/environment";
 
 function getServerUrl(url: string) {
 	const processEnv = (
@@ -41,6 +42,8 @@ export const authClient = createAuthClient({
 	// public auth path must equal the server-side mount (/api/auth everywhere)
 	baseURL: new URL(
 		"/api/auth",
-		getServerUrl(PUBLIC_SERVER_URL || "/"),
+		getServerUrl(
+			dev && typeof window !== "undefined" ? "/" : PUBLIC_SERVER_URL || "/",
+		),
 	).toString(),
 });

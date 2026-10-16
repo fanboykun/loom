@@ -19,6 +19,7 @@
 		exitedAt?: string;
 		exitCode?: number;
 		error?: string;
+		interrupted?: boolean;
 	};
 	type Xterm = import("@xterm/xterm").Terminal;
 	type FitAddonType = import("@xterm/addon-fit").FitAddon;
@@ -173,7 +174,25 @@ type TerminalView = { terminal: Xterm; fit: FitAddonType; socket?: WebSocket; re
 		try {
 			sessions = await request<TerminalSession[]>(`/api/projects/${encodeURIComponent(projectId)}/terminals`);
 			if (!sessions.length) await createSession();
-			else if (!activeId || !sessions.some((session) => session.id === activeId)) activeId = sessions[0]!.id;
+			else {
+				if (!activeId || !sessions.some((session) => session.id === activeId)) activeId = sessions[0]!.id;
+				sessions = await Promise.all(sessions.map(async (session) => {
+					if (!session.interrupted) return session;
+					try {
+						return await request<TerminalSession>(`/api/terminals/${encodeURIComponent(session.id)}/restart?projectId=${encodeURIComponent(projectId)}`, {
+							method: "POST",
+							body: JSON.stringify({ expectedGeneration: session.generation, approved: true, idempotencyKey: crypto.randomUUID() }),
+						});
+					} catch (reason) {
+						return {
+							...session,
+							status: "failed" as const,
+							interrupted: false,
+							error: reason instanceof Error ? reason.message : "Unable to resume terminal.",
+						};
+					}
+				}));
+			}
 		} catch (reason) { error = reason instanceof Error ? reason.message : "Unable to load terminals."; }
 		finally { loading = false; }
 		// The terminal viewports are inside the non-loading branch. Mount xterm
