@@ -42,7 +42,7 @@ const shot = $derived(screenshots[view as keyof typeof screenshots]);
 const features = [
 	{
 		icon: GitBranch,
-		title: "Room for every task.",
+		title: "A workspace for every task.",
 		text: "Each task works in its own Git worktree. Independent agents can make progress at the same time.",
 		tag: "Isolated workspaces",
 	},
@@ -60,13 +60,25 @@ const features = [
 	},
 	{
 		icon: MessageSquare,
-		title: "Keep the conversation close.",
-		text: "Read OpenCode responses, mention project files, and inspect edits alongside the task they belong to.",
-		tag: "Connected to OpenCode",
+		title: "Keep workstreams in reach.",
+		text: "Open separate chat tabs, split the view, and keep conversations for different parts of a project easy to switch between.",
+		tag: "Multi-chat workspace",
+	},
+	{
+		icon: Command,
+		title: "Choose the right runtime.",
+		text: "Use OpenCode for the primary workspace flow, or route chat through a connected Claude Code, Codex CLI, or Antigravity CLI provider.",
+		tag: "Provider choice",
+	},
+	{
+		icon: Layers,
+		title: "See the work around the chat.",
+		text: "Keep project files, terminal sessions, agent activity, and available context close to the conversation.",
+		tag: "Workspace tools",
 	},
 ];
 </script>
-<svelte:head><title>Loom — A workspace for parallel coding agents</title><meta name="description" content="Plan work, run OpenCode agents in isolated Git worktrees, and review the result in one local workspace. Install Loom on macOS, Windows, and Linux."/><meta property="og:title" content="Loom — A clear desk for parallel agents"/><meta property="og:description" content="Plan together. Work in parallel. Review before it lands."/><meta property="og:type" content="website"/></svelte:head>
+<svelte:head><title>Loom — A workspace for parallel coding agents</title><meta name="description" content="Plan work, run coding agents in isolated Git worktrees, and review the result in one local workspace. Install Loom on macOS, Windows, and Linux."/><meta property="og:title" content="Loom — A clear desk for parallel agents"/><meta property="og:description" content="Plan together. Work in parallel. Review before it lands."/><meta property="og:type" content="website"/></svelte:head>
 <main id="main">
   <section class="hero section-width">
     <div class="hero-copy"><p class="eyebrow"><span class="live-dot"></span> YOUR MACHINE. YOUR WORKSPACE.</p><h1>A clear desk for<br/><span>parallel agents.</span></h1><p class="hero-description">Give your ideas a plan. Let OpenCode agents work side by side. Bring it all together with a review you can trust.</p><div class="hero-actions"><Button href="#install" size="lg" class="primary-cta">Make room for your next idea <ArrowRight size={17}/></Button><a class="text-link" href={sitePath("/docs/")}>Take a look at the docs <ArrowUpRight size={15}/></a></div><p class="platform-note"><Command size={13}/> macOS <span>·</span> Windows <span>·</span> Linux <span class="note-divider">/</span> No JavaScript runtime required</p></div>
@@ -76,19 +88,20 @@ const features = [
       <div class="object-caption"><span>From a plan to a reviewed change.</span><Button variant="ghost" size="icon-sm" onclick={() => animate = !animate} aria-label={animate ? "Pause decorative animation" : "Play decorative animation"}>{#if animate}<Pause size={13}/>{:else}<Play size={13}/>{/if}</Button></div>
     </div>
   </section>
-  <div class="principles section-width"><p>Less window switching.<br/><strong>More of the work that matters.</strong></p><span><GitBranch size={17}/> Git worktrees</span><span><MessageSquare size={17}/> OpenCode sessions</span><span><ShieldCheck size={17}/> Human approval</span></div>
+  <div class="principles section-width"><p>Less window switching.<br/><strong>More of the work that matters.</strong></p><span><GitBranch size={17}/> Git worktrees</span><span><MessageSquare size={17}/> Provider-backed chats</span><span><ShieldCheck size={17}/> Human approval</span></div>
   <section id="inside" class="inside section-width"><div class="section-heading"><div><p class="eyebrow">A PLACE FOR THE WHOLE PROCESS</p><h2>Follow the work.<br/><span>Keep the context.</span></h2></div><p>Your plan, conversations, and changes belong together. Loom gives them a shared home.</p></div>
     <Tabs.Root bind:value={view}><Tabs.List class="screenshot-tabs" aria-label="Explore Loom screenshots"><Tabs.Trigger value="workspace">01 · Workspace</Tabs.Trigger><Tabs.Trigger value="plan">02 · Plan</Tabs.Trigger><Tabs.Trigger value="review">03 · Review</Tabs.Trigger></Tabs.List><div class="screenshot-stage"><div class="browser-frame"><div class="browser-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>loom / {view}</span><span class="local-indicator"><span class="live-dot"></span> Local workspace</span></div><img src={sitePath(`/screenshots/${shot.src}`)} alt={shot.alt} width="1440" height="900" loading="lazy"/></div></div></Tabs.Root>
     <div class="screenshot-caption"><strong>{shot.label}</strong><p>{shot.text}</p><span>Captured in Loom</span></div>
   </section>
   <section id="features" class="features section-width"><div class="section-heading"><div><p class="eyebrow">BUILT FOR WORK THAT HAS MOVING PARTS</p><h2>Give the agents space.<br/><span>Keep yourself in control.</span></h2></div><a class="text-link" href={sitePath("/docs/parallel-tasks/")}>How parallel work works <ArrowUpRight size={16}/></a></div><div class="feature-grid">{#each features as feature}<article class="feature-card glass"><div class="feature-icon"><feature.icon size={22} strokeWidth={1.5}/></div><p class="feature-tag">{feature.tag}</p><h3>{feature.title}</h3><p>{feature.text}</p></article>{/each}</div></section>
   <section class="workflow section-width"><div><p class="eyebrow">ONE IDEA. THREE DELIBERATE STEPS.</p><h2>A little structure.<br/><span>A lot less juggling.</span></h2><p class="section-intro">Start with a repository and a goal. Stay as involved as the work requires.</p><Button href={sitePath("/docs/getting-started/")} variant="outline">Your first project <ArrowRight size={15}/></Button></div><ol class="workflow-steps"><li><span>01</span><div><h3>Make the plan yours.</h3><p>Create a plan. Review the proposed tasks, adjust dependencies, and approve the commands that will validate the result.</p></div></li><li><span>02</span><div><h3>Let independent work move.</h3><p>Agents work in isolated branches. Follow the Kanban board, read the chat, and respond when an agent needs permission.</p></div></li><li><span>03</span><div><h3>Bring it home, thoughtfully.</h3><p>Inspect the task changes and check results. Merge each task when you are happy with what you see.</p></div></li></ol></section>
-  <section class="local-note section-width glass"><span class="local-icon"><ShieldCheck size={33} strokeWidth={1.3}/></span><div><p class="eyebrow">LOCAL BY DEFAULT</p><h3>Your repositories stay on your machine.</h3><p>Loom stores its workspace data locally. OpenCode sends the context needed for a task to your configured model provider. You choose that provider.</p></div><a class="text-link" href={sitePath("/docs/privacy/")}>Read the privacy details <ArrowUpRight size={15}/></a></section>
+  <section class="local-note section-width glass"><span class="local-icon"><ShieldCheck size={33} strokeWidth={1.3}/></span><div><p class="eyebrow">LOCAL BY DEFAULT</p><h3>Your repositories stay on your machine.</h3><p>Loom keeps project and task data locally. Messages, selected files, and tool context may be sent to the provider selected for that chat or task.</p></div><a class="text-link" href={sitePath("/docs/privacy/")}>Read the privacy details <ArrowUpRight size={15}/></a></section>
   <section id="install" class="install-section section-width"><div><p class="eyebrow">A SMALL START FOR YOUR NEXT BIG THING</p><h2>One command.<br/><span>Your own workspace.</span></h2><p>Install Loom, then open it with <code>loom</code>. Git and a configured OpenCode installation are the only prerequisites.</p><a class="text-link" href={sitePath("/docs/installation/")}>Full installation guide <ArrowUpRight size={16}/></a></div><div class="install-panel glass"><InstallCommand/><div class="install-foot"><span><Check size={13}/> Runtime included</span><span><Check size={13}/> Verified downloads</span></div><p class="release-note">Installers use published <a href={`${repository}/releases`}>GitHub Releases</a>. Availability and platform requirements are listed in the docs.</p></div></section>
   <section class="faq section-width"><div><p class="eyebrow">BEFORE YOU GET STARTED</p><h2>A few useful details.</h2></div><div>{#each [
-    ["Do I need Node.js or Bun?", "No. The distributed Loom executable includes its runtime and web application. You will need Git and OpenCode available on your PATH, plus a model provider configured in OpenCode."],
+    ["Do I need Node.js or Bun?", "No. The distributed Loom executable includes its runtime and web application. You will need Git and OpenCode available on your PATH for Loom's primary task workflow. For chat, you can also connect supported Claude Code, Codex CLI, or Antigravity CLI runtimes."],
     ["Can I use my existing repository?", "Yes. Add the path to a local Git repository with at least one commit. Loom creates separate worktrees for tasks. Keep your main checkout clean before approving a merge."],
-    ["Does Loom choose my model?", "OpenCode manages your providers and model access. Loom connects your sessions to the workspace and lets you follow their work. Provider usage and charges follow your own provider configuration."],
+    ["Does Loom choose my model?", "You choose a connected provider and model in chat. Custom agents can have their own provider and optional model. Loom's task workflow uses OpenCode; provider usage and charges follow the provider selected for each request."],
+    ["Does the selected agent stay the same for every message?", "The model, custom agent, and thinking mode are selected for each message. You can switch them during a conversation, so check the composer before sending if you want to keep using the same setup."],
     ["What happens when changes conflict?", "Integration happens in a separate workspace. A resolver can propose a fix, and checks run again. The combined diff still needs your approval before it reaches your project branch."],
   ] as [question, answer]}<details><summary>{question}<span>+</span></summary><p>{answer}</p></details>{/each}</div></section>
 </main>

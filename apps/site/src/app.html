@@ -1,2 +1,13 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="theme-color" content="#f5f6f2" /><link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />%sveltekit.head%</head><body data-sveltekit-preload-data="hover"><div style="display: contents">%sveltekit.body%</div></body></html>
+<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="theme-color" content="#f5f6f2" /><script>
+	try {
+		const saved = localStorage.getItem("loom-site-theme");
+		const theme = saved === "dark" || saved === "light"
+			? saved
+			: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+		document.documentElement.dataset.theme = theme;
+		document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#171a15" : "#f5f6f2");
+	} catch {
+		document.documentElement.dataset.theme = "light";
+	}
+</script><link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />%sveltekit.head%</head><body data-sveltekit-preload-data="hover"><div style="display: contents">%sveltekit.body%</div></body></html>
